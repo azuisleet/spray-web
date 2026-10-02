@@ -1,13 +1,11 @@
 import {useEffect, useRef, useState} from 'react'
-import {convertImageToVTF, preferBalanced, preferDetail, preferMotion, qualityModeCubic} from "./encoder.js";
+import {convertImageToVTF, preferBalanced, preferDetail, preferMotion} from "./encoder.js";
 import {buildVMT} from "./vtf.js";
-import CanvasKitInit from "canvaskit-wasm/bin/canvaskit.js";
-import CanvasKitWasm from "canvaskit-wasm/bin/canvaskit.wasm?url";
 
 const modeSingle = "single";
 const modeMipTrick = "mipTrick";
 
-const acceptedTypes = ["image/gif", "image/png", "image/jpeg"];
+const acceptedTypes = ["image/gif", "image/png", "image/apng", "image/jpeg", "image/webp", "image/avif"];
 
 // The GPU drops to mip level k once the spray is drawn at about baseDimension / 2^k
 // screen pixels, so picking the swap in pixels is resolution independent.
@@ -46,7 +44,7 @@ function renderDropZone(inputRef, label, hint, file, onSelect) {
              }}>
             <div className="font-bold">{label}</div>
             <div className="text-sm opacity-70">{file ? file.name : hint}</div>
-            <input ref={inputRef} type="file" className="hidden" accept="image/png,image/jpeg,image/gif"
+            <input ref={inputRef} type="file" className="hidden" accept={acceptedTypes.join(",")}
                    onClick={(event) => event.stopPropagation()}
                    onChange={(event) => {
                        const selected = event.target.files?.[0];
@@ -59,7 +57,6 @@ function renderDropZone(inputRef, label, hint, file, onSelect) {
 }
 
 function App() {
-    const [canvasKit, setCanvasKit] = useState();
     const [error, setError] = useState();
     const [mode, setMode] = useState(modeSingle);
     const [file, setFile] = useState();
@@ -104,40 +101,22 @@ function App() {
     };
 
     useEffect(() => {
-        console.log(`Loading CanvasKit`);
-        CanvasKitInit({locateFile: () => CanvasKitWasm})
-            .then((CanvasKit) => {
-                setCanvasKit(CanvasKit);
-                console.log(`CanvasKit Loaded`);
-            })
-            .catch(err => setError(`Failed to load CanvasKit: ${err.message}`));
-    }, []);
-
-    useEffect(() => {
-        if (!file || !canvasKit || job.current) return;
+        if (!file || job.current) return;
         if (mode === modeMipTrick && !farFile) return;
 
         const descriptor = {mode, file, farFile: mode === modeMipTrick ? farFile : null, swapPixels, preference};
         if (sameJob(lastJob.current, descriptor)) return;
 
-        console.log(`Reading file ${file.name}`);
+        console.log(`Converting ${file.name}`);
         job.current = descriptor;
         setConverting(true);
         setError(null);
         setProgress(0);
 
-        const buffers = descriptor.farFile
-            ? Promise.all([file.arrayBuffer(), descriptor.farFile.arrayBuffer()])
-            : file.arrayBuffer().then(buffer => [buffer, null]);
-
-        buffers
-            .then(([nearBuffer, farBuffer]) => {
-                console.log(`Loading file ${file.name}`);
-                return convertImageToVTF(canvasKit, nearBuffer, setProgress, qualityModeCubic, {
-                    mipTrick: farBuffer ? {arrayBuffer: farBuffer, swapPixels} : null,
-                    preference,
-                });
-            })
+        convertImageToVTF(file, setProgress, {
+            mipTrick: descriptor.farFile ? {file: descriptor.farFile, swapPixels} : null,
+            preference,
+        })
             .then(({blob, ...info}) => {
                 job.current = null;
                 lastJob.current = descriptor;
@@ -156,7 +135,7 @@ function App() {
                 setVtfBlobUrl(null);
                 setVmtBlobUrl(null);
             });
-    }, [canvasKit, file, farFile, mode, swapPixels, preference, baseName]);
+    }, [file, farFile, mode, swapPixels, preference, baseName]);
 
     const waitingForFar = mode === modeMipTrick && !!file && !farFile;
 
@@ -184,7 +163,7 @@ function App() {
                     <h1 className="text-3xl font-bold">
                         {!converting ? "Drag and Drop Image" : `Converting ${file.name}`}
                     </h1>
-                    <input ref={input} type="file" className="hidden" accept="image/png,image/jpeg,image/gif"
+                    <input ref={input} type="file" className="hidden" accept={acceptedTypes.join(",")}
                            onChange={(event) => {
                                const selected = event.target.files?.[0];
                                if (selected) selectFile(selected);

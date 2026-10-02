@@ -1,9 +1,6 @@
+import {openImage} from "./decode.js";
 import {getEncoderPool} from "./encoderPool.js";
 import {baseFlags, buildHeader, dxt1Size, flagNoMip, headerSize, maximumSize, mipDimensions} from "./vtf.js";
-
-export const qualityModeNearest = 0;
-export const qualityModeLinear = 1;
-export const qualityModeCubic = 2;
 
 export const preferDetail = "detail";
 export const preferBalanced = "balanced";
@@ -129,31 +126,19 @@ export function chooseFrameIndices(durations, frames) {
     return indices;
 }
 
-function collectDurations(canvasKit, arrayBuffer, frameCount) {
-    const scan = canvasKit.MakeAnimatedImageFromEncoded(arrayBuffer);
-    const durations = [];
-
-    for (let i = 0; i < frameCount; i++) {
-        durations.push(Math.max(1, scan.currentFrameDuration() || 1));
-        if (i < frameCount - 1) scan.decodeNextFrame();
-    }
-
-    scan.delete();
-    return durations;
-}
-
 // Where the image goes in the texture: its place in the square decal, stretched onto the
 // texture's grid, which the decal stretches back to square on the wall.
-function destinationRect(canvasKit, width, height, targetWidth, targetHeight) {
+function destinationRect(width, height, targetWidth, targetHeight) {
     const {fitX, fitY} = squareFit(width, height);
     const scaledWidth = targetWidth * fitX;
     const scaledHeight = targetHeight * fitY;
 
-    return canvasKit.LTRBRect(
-        (targetWidth - scaledWidth) / 2,
-        (targetHeight - scaledHeight) / 2,
-        (targetWidth + scaledWidth) / 2,
-        (targetHeight + scaledHeight) / 2);
+    return {
+        x0: (targetWidth - scaledWidth) / 2,
+        y0: (targetHeight - scaledHeight) / 2,
+        x1: (targetWidth + scaledWidth) / 2,
+        y1: (targetHeight + scaledHeight) / 2,
+    };
 }
 
 // A MessageChannel round trip lets the page paint between frames. Unlike rAF and
@@ -169,40 +154,23 @@ function yieldToEventLoop() {
     });
 }
 
-function drawLevel(canvasKit, entry, image, src, dst, qualityMode) {
-    const {surface, canvas, info} = entry;
-    canvas.clear(canvasKit.TRANSPARENT);
-    if (qualityMode === qualityModeCubic)
-        canvas.drawImageRectCubic(image, src, dst, 1 / 3, 1 / 3);
-    else
-        canvas.drawImageRectOptions(image, src, dst, qualityMode === qualityModeNearest ? canvasKit.FilterMode.Nearest : canvasKit.FilterMode.Linear, canvasKit.MipmapMode.None);
-    surface.flush();
-    return canvas.readPixels(0, 0, info);
-}
-
 /**
- * @param options {mipTrick, preference} where mipTrick is {arrayBuffer, swapPixels} for
- *                the image that takes over once the spray draws smaller than swapPixels.
+ * @param file Blob of the image; its type picks the decoder
+ * @param options {mipTrick, preference} where mipTrick is {file, swapPixels} for the
+ *                image that takes over once the spray draws smaller than swapPixels.
  */
-export async function convertImageToVTF(canvasKit, arrayBuffer, setProgress, qualityMode, options = {}) {
+export async function convertImageToVTF(file, setProgress, options = {}) {
     const {mipTrick = null, preference = preferBalanced} = options;
 
     const pool = getEncoderPool();
-    const surfaces = new Map();
-    let animatedImage = null;
+    let image = null;
     let farImage = null;
 
     try {
-        animatedImage = canvasKit.MakeAnimatedImageFromEncoded(arrayBuffer);
-        if (!animatedImage) throw new Error("Could not decode the image");
+        image = await openImage(file);
+        farImage = mipTrick ? await openImage(mipTrick.file) : null;
 
-        const frameCount = Math.max(1, animatedImage.getFrameCount());
-        const width = animatedImage.width();
-        const height = animatedImage.height();
-        const srcRect = canvasKit.LTRBRect(0, 0, width, height);
-
-        farImage = mipTrick ? canvasKit.MakeImageFromEncoded(mipTrick.arrayBuffer) : null;
-        if (mipTrick && !farImage) throw new Error("Could not decode the distant image");
+        const {width, height, frameCount} = image;
         const useMips = !!farImage;
 
         const target = chooseTarget(width, height, frameCount, useMips, preference);
@@ -210,10 +178,11 @@ export async function convertImageToVTF(canvasKit, arrayBuffer, setProgress, qua
 
         const {targetWidth, targetHeight, frames: nFrames} = target;
 
-        // Only pay for the extra decode pass when frames actually have to be dropped.
+        // Only read the timings when frames actually have to be dropped; for some decoders
+        // that costs a pass of its own.
         const frameIndices = nFrames < frameCount
-            ? chooseFrameIndices(collectDurations(canvasKit, arrayBuffer, frameCount), nFrames)
-            : null;
+            ? chooseFrameIndices(await image.durations(), nFrames)
+            : Array.from({length: nFrames}, (_, i) => i);
 
         const levelDimensions = useMips ? mipDimensions(targetWidth, targetHeight) : [[targetWidth, targetHeight]];
         const mipCount = levelDimensions.length;
@@ -229,74 +198,59 @@ export async function convertImageToVTF(canvasKit, arrayBuffer, setProgress, qua
             `${(target.waste * 100).toFixed(0)}% padding, ${target.cost + headerSize} bytes`);
         if (useMips) console.log(`Distant image from mip ${swapLevel} (${levelDimensions[swapLevel].join("x")}) down`);
 
-        const surfaceFor = (width, height) => {
-            const key = `${width}x${height}`;
-            let entry = surfaces.get(key);
-            if (!entry) {
-                const surface = canvasKit.MakeSurface(width, height);
-                entry = {surface, canvas: surface.getCanvas(), info: surface.imageInfo()};
-                surfaces.set(key, entry);
-            }
-            return entry;
-        };
+        // Levels under 4x4 still cost a whole block, so they are drawn at 4x4.
+        const levels = levelDimensions.map(([w, h]) => ({
+            width: Math.max(minBlockDimension, w),
+            height: Math.max(minBlockDimension, h),
+        }));
+        const nearLevels = levels.slice(0, swapLevel)
+            .map(level => ({...level, rect: destinationRect(width, height, level.width, level.height)}));
+        const farLevels = levels.slice(swapLevel)
+            .map(level => ({...level, rect: destinationRect(farImage.width, farImage.height, level.width, level.height)}));
 
-        const levels = levelDimensions.map(([w, h], level) => {
-            const renderWidth = Math.max(minBlockDimension, w);
-            const renderHeight = Math.max(minBlockDimension, h);
-            return {level, renderWidth, renderHeight, near: destinationRect(canvasKit, width, height, renderWidth, renderHeight)};
+        // A long-held source frame can fill several slots; it is encoded once and shared.
+        const slotsByIndex = new Map();
+        frameIndices.forEach((index, slot) => {
+            if (!slotsByIndex.has(index)) slotsByIndex.set(index, []);
+            slotsByIndex.get(index).push(slot);
         });
-        const nearLevels = levels.slice(0, swapLevel);
-        const farLevels = levels.slice(swapLevel);
 
         // VTF stores mips smallest first with every frame of a level together, so the levels
         // stay separate until assembly rather than being pushed as one flat list.
         const mipFrames = levels.map(() => new Array(nFrames));
-        const totalWork = nFrames * nearLevels.length + farLevels.length;
+        const totalWork = slotsByIndex.size * nearLevels.length + farLevels.length;
         let completed = 0;
 
-        const encodeLevel = (level, pixels, store) => pool
-            .encode(level.renderWidth, level.renderHeight, pixels)
-            .then(blocks => {
-                store(blocks);
-                completed += 1;
-                setProgress(completed / totalWork);
-            });
+        const render = (source, level) => pool.render(source, level).then(blocks => {
+            completed += 1;
+            setProgress(completed / totalWork);
+            return blocks;
+        });
 
         // The distant image is the same in every frame, so its levels are encoded once
         // and the blocks shared across frames.
-        const farSrcRect = farImage ? canvasKit.LTRBRect(0, 0, farImage.width(), farImage.height()) : null;
-        const farWork = Promise.all(farLevels.map(level => {
-            const dst = destinationRect(canvasKit, farImage.width(), farImage.height(), level.renderWidth, level.renderHeight);
-            const pixels = drawLevel(canvasKit, surfaceFor(level.renderWidth, level.renderHeight), farImage, farSrcRect, dst, qualityMode);
-            return encodeLevel(level, pixels, blocks => mipFrames[level.level].fill(blocks));
-        }));
-        farWork.catch(() => {});   // surfaced when awaited below, not as an unhandled rejection
+        const farWork = [];
+        if (farImage) {
+            for await (const [, pixels] of farImage.frames([0])) {
+                const source = {pixels, width: farImage.width, height: farImage.height};
+                farLevels.forEach((level, n) => farWork.push(
+                    render(source, level).then(blocks => mipFrames[swapLevel + n].fill(blocks))));
+            }
+        }
+        const farDone = Promise.all(farWork);
+        farDone.catch(() => {});   // surfaced when awaited below, not as an unhandled rejection
 
         // Bounded so a long animation does not hold every frame's pixels at once, and
         // so the decoder never runs far ahead of the workers.
         const maxFramesInFlight = pool.size * 2;
-        const inFlight = [farWork];
-        let sourceIndex = 0;
+        const inFlight = [farDone];
 
-        for (let emitted = 0; emitted < nFrames; emitted++) {
-            const wanted = frameIndices ? frameIndices[emitted] : emitted;
-            while (sourceIndex < wanted) {
-                animatedImage.decodeNextFrame();
-                sourceIndex += 1;
-            }
-
-            const frame = animatedImage.makeImageAtCurrentFrame();
-            const frameWork = [];
-            try {
-                for (const level of nearLevels) {
-                    const pixels = drawLevel(canvasKit, surfaceFor(level.renderWidth, level.renderHeight), frame, srcRect, level.near, qualityMode);
-                    frameWork.push(encodeLevel(level, pixels, blocks => mipFrames[level.level][emitted] = blocks));
-                }
-            } finally {
-                frame.delete();
-            }
-
-            const work = Promise.all(frameWork);
+        for await (const [index, pixels] of image.frames([...slotsByIndex.keys()])) {
+            const source = {pixels, width, height};
+            const slots = slotsByIndex.get(index);
+            const work = Promise.all(nearLevels.map((level, n) => render(source, level).then(blocks => {
+                for (const slot of slots) mipFrames[n][slot] = blocks;
+            })));
             work.catch(() => {});
             inFlight.push(work);
 
@@ -305,6 +259,7 @@ export async function convertImageToVTF(canvasKit, arrayBuffer, setProgress, qua
         }
 
         await Promise.all(inFlight);
+        if (mipFrames.some(frames => frames.includes(undefined))) throw new Error("The image ended before all its frames were read");
         setProgress(1);
         console.log('Completed');
 
@@ -325,8 +280,7 @@ export async function convertImageToVTF(canvasKit, arrayBuffer, setProgress, qua
             swapDimension: useMips ? Math.max(...levelDimensions[swapLevel]) : null,
         };
     } finally {
-        for (const {surface} of surfaces.values()) surface.delete();
-        farImage?.delete();
-        animatedImage?.delete();
+        image?.close();
+        farImage?.close();
     }
 }

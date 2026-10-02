@@ -9,9 +9,12 @@
     "lint": "eslint . --max-warnings 0",
     "preview": "vite preview",
     "test-sprays": "node scripts/test-sprays.mjs",
-    "test": "vitest run"
+    "test": "vitest run",
+    "deploy": "vite build && node scripts/deploy.mjs"
   },
   "dependencies": {
+    "@fontsource-variable/big-shoulders-display": "^5.3.0",
+    "@fontsource-variable/big-shoulders-stencil-display": "^5.3.0",
     "react": "^19.3.0",
     "react-dom": "^19.3.0"
   },

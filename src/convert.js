@@ -9,6 +9,40 @@ import {baseFlags, buildHeader, flagNoMip, headerSize, mipDimensions} from "./vt
 // Levels under 4x4 still cost a whole DXT1 block, so they are drawn at 4x4.
 const minBlockDimension = 4;
 
+// Share of the progress bar given to opening the image, before any strip is finished.
+const openedShare = 0.1;
+
+// Longest side of the thumbnail probeImage returns, unless asked for another.
+const defaultThumbnailSize = 512;
+
+/**
+ * Reads what planning needs from an image without converting it, plus a thumbnail of the
+ * first frame for showing the source.
+ *
+ * @returns {width, height, frameCount, durations (ms), thumbnail: ImageBitmap}
+ */
+export async function probeImage(file, {signal, thumbnailSize = defaultThumbnailSize} = {}) {
+    const image = await openImage(file);
+    try {
+        const durations = image.frameCount > 1 ? await image.durations() : [0];
+        signal?.throwIfAborted();
+
+        let thumbnail = null;
+        for await (const [, pixels] of image.frames([0])) {
+            const scale = Math.min(1, thumbnailSize / Math.max(image.width, image.height));
+            thumbnail = await createImageBitmap(new ImageData(new Uint8ClampedArray(pixels), image.width, image.height), {
+                resizeWidth: Math.max(1, Math.round(image.width * scale)),
+                resizeHeight: Math.max(1, Math.round(image.height * scale)),
+                resizeQuality: "high",
+            });
+        }
+
+        return {width: image.width, height: image.height, frameCount: image.frameCount, durations, thumbnail};
+    } finally {
+        image.close();
+    }
+}
+
 // A MessageChannel round trip lets the page paint between frames. Unlike rAF and
 // setTimeout it is not paused or throttled in a background tab.
 function yieldToEventLoop() {
@@ -27,7 +61,7 @@ function yieldToEventLoop() {
  *
  * @param file Blob of the image; its type picks the decoder
  * @param options
- *   mipTrick   {file, swapPixels}: an image that takes over once the spray draws smaller
+ *   mipTrick   {file, swapPixels, focus}: an image that takes over once the spray draws smaller
  *              than swapPixels on screen
  *   preference preferBalanced, preferDetail or preferMotion, for when it will not all fit
  *   fit        fitPad, fitCrop or fitStretch: how the image meets the square decal
@@ -59,6 +93,9 @@ export async function convertImage(file, options = {}) {
         image = await openImage(file);
         farImage = mipTrick ? await openImage(mipTrick.file) : null;
         signal?.throwIfAborted();
+        // A still is decoded by now, often the longest single step, so say so before the
+        // strip by strip progress below takes over the rest.
+        onProgress(openedShare);
 
         const {width, height, frameCount} = image;
         const useMips = !!farImage;
@@ -90,7 +127,7 @@ export async function convertImage(file, options = {}) {
         };
         const nearLevels = levelDimensions.slice(0, swapLevel).map(levelFor(fitGeometry(width, height, fit, focus)));
         const farLevels = farImage
-            ? levelDimensions.slice(swapLevel).map(levelFor(fitGeometry(farImage.width, farImage.height, fit, focus)))
+            ? levelDimensions.slice(swapLevel).map(levelFor(fitGeometry(farImage.width, farImage.height, fit, mipTrick.focus)))
             : [];
 
         // A long-held source frame can fill several slots; it is encoded once and shared.
@@ -103,13 +140,15 @@ export async function convertImage(file, options = {}) {
         // VTF stores mips smallest first with every frame of a level together, so the levels
         // stay separate until assembly rather than being pushed as one flat list.
         const levels = levelDimensions.map(() => new Array(nFrames));
-        const totalWork = slotsByIndex.size * nearLevels.length + farLevels.length;
-        let completed = 0;
+        // Progress counts finished pixels, a strip at a time, so a single large level moves
+        // steadily rather than jumping from nothing to done.
+        const pixelsOf = (list) => list.reduce((sum, level) => sum + level.width * level.height, 0);
+        const totalPixels = slotsByIndex.size * pixelsOf(nearLevels) + pixelsOf(farLevels);
+        let finishedPixels = 0;
 
-        const render = (source, level) => pool.render(source, level, signal).then(blocks => {
-            completed += 1;
-            onProgress(completed / totalWork);
-            return blocks;
+        const render = (source, level) => pool.render(source, level, signal, (pixels) => {
+            finishedPixels += pixels;
+            if (!signal?.aborted) onProgress(openedShare + (1 - openedShare) * finishedPixels / totalPixels);
         });
 
         // The distant image is the same in every frame, so its levels are encoded once

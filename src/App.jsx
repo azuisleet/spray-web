@@ -1,16 +1,28 @@
-import {useMemo, useRef, useState} from 'react'
-import {preferBalanced, preferDetail, preferMotion} from "./plan.js";
-import {downloadBlob, useConversion} from "./useConversion.js";
-import {buildVMT} from "./vtf.js";
+import {useMemo, useState, useSyncExternalStore} from 'react'
+import {BulkQueue} from "./bulkQueue.js";
+import Bulk from "./components/Bulk.jsx";
+import {ChoicePicker, OutputPanel} from "./components/Output.jsx";
+import Preview from "./components/Preview.jsx";
+import {DropZone, FitControl, SourceThumbnail} from "./components/Source.jsx";
+import {Label, Panel, ProgressBar, Spinner} from "./components/ui.jsx";
+import {acceptedNames, acceptedTypes} from "./formats.js";
+import {convertImage, probeImage} from "./convert.js";
+import {candidateChoices, fitPad, listCandidates} from "./plan.js";
+import {useConversion, useProbe} from "./useConversion.js";
 
 const modeSingle = "single";
 const modeMipTrick = "mipTrick";
+const modeBulk = "bulk";
 
-const acceptedTypes = ["image/gif", "image/png", "image/apng", "image/jpeg", "image/webp", "image/avif"];
-const acceptedNames = "GIF, PNG, JPEG, WebP or AVIF";
+const modes = [[modeSingle, "Single image"], [modeMipTrick, "Mip trick"], [modeBulk, "Bulk"]];
+
+// Small thumbnails for the bulk list, which may hold hundreds of files.
+const bulkThumbnailSize = 96;
 
 const siteUrl = "https://azuisleet.github.io";
 const sourceUrl = "https://github.com/azuisleet/spray-web";
+
+const centred = {x: 0.5, y: 0.5};
 
 // The GPU drops to mip level k once the spray is drawn at about baseDimension / 2^k
 // screen pixels, so picking the swap in pixels is resolution independent.
@@ -21,84 +33,18 @@ const swapOptions = [
     {pixels: 16, label: "16 px", hint: "sniper range"},
 ];
 
-const preferenceOptions = [
-    {value: preferBalanced, label: "Balanced"},
-    {value: preferDetail, label: "Favour resolution"},
-    {value: preferMotion, label: "Favour smooth motion"},
-];
-
 function baseNameOf(file) {
     const dot = file.name.lastIndexOf(".");
     return dot > 0 ? file.name.slice(0, dot) : file.name;
 }
 
-function firstFile(fileList) {
-    return fileList?.[0] ?? null;
-}
-
-function FileInput({inputRef, onSelect}) {
-    return (
-        <input ref={inputRef} type="file" className="hidden" accept={acceptedTypes.join(",")}
-               onClick={(event) => event.stopPropagation()}
-               onChange={(event) => {
-                   const selected = firstFile(event.target.files);
-                   if (selected) onSelect(selected);
-                   event.target.value = null;
-               }}
-        />
-    );
-}
-
-function DropZone({label, hint, file, onSelect}) {
-    const inputRef = useRef();
-    return (
-        <div className="flex w-56 cursor-pointer flex-col items-center justify-center gap-1 rounded-sm border-2 border-dashed border-neutral-400 px-3 py-8 text-center"
-             onClick={() => inputRef.current.click()}
-             onDragOver={(event) => event.preventDefault()}
-             onDrop={(event) => {
-                 event.preventDefault();
-                 event.stopPropagation();
-                 const dropped = firstFile(event.dataTransfer.files);
-                 if (dropped) onSelect(dropped);
-             }}>
-            <div className="font-bold">{label}</div>
-            <div className="text-sm opacity-70">{file ? file.name : hint}</div>
-            <FileInput inputRef={inputRef} onSelect={onSelect}/>
-        </div>
-    );
-}
-
-function Select({label, value, options, onChange, className = ""}) {
-    return (
-        <label className={`mt-4 flex items-center gap-2 ${className}`}>
-            <span>{label}</span>
-            <select className="rounded-xs border border-neutral-400 bg-transparent px-2 py-1"
-                    value={value}
-                    onChange={(event) => onChange(event.target.value)}>
-                {options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-            </select>
-        </label>
-    );
-}
-
-function Summary({result}) {
-    const parts = [`${result.width}×${result.height}`];
-    if (result.sourceFrames > 1) {
-        parts.push(`${result.frames} frames from ${result.sourceFrames}`);
-        parts.push(`plays in ${result.playSeconds.toFixed(1)} s (original ${result.sourceSeconds.toFixed(1)} s)`);
-    }
-    if (result.padding > 0.005) parts.push(`${Math.round(result.padding * 100)}% padding`);
-    parts.push(`${result.bytes.toLocaleString()} bytes`);
-    if (result.swapLevel !== null) parts.push(`distant image from mip ${result.swapLevel} (${result.swapDimension} px) down`);
-    return <div className="self-center text-center text-sm opacity-70">{parts.join(", ")}</div>;
-}
-
-function DownloadButton({name, blob}) {
-    return (
-        <button type="button" className="cursor-pointer self-center underline" onClick={() => downloadBlob(blob(), name)}>
-            {name}
-        </button>
-    );
+// How far along the bulk queue is, counting the running file's progress, or null when idle.
+function bulkActivity({items}) {
+    const active = items.filter(item => item.status !== "error");
+    if (!active.some(item => ["probing", "waiting", "converting"].includes(item.status))) return null;
+    const done = active.filter(item => item.status === "done").length;
+    const running = active.find(item => item.status === "converting");
+    return (done + (running?.progress ?? 0)) / active.length;
 }
 
 function App() {
@@ -106,126 +52,164 @@ function App() {
     const [file, setFile] = useState(null);
     const [farFile, setFarFile] = useState(null);
     const [swapPixels, setSwapPixels] = useState(64);
-    const [preference, setPreference] = useState(preferBalanced);
-    const [keepAllFrames, setKeepAllFrames] = useState(false);
+    const [choiceKey, setChoiceKey] = useState("balanced");
+    const [fit, setFit] = useState(fitPad);
+    const [focus, setFocus] = useState(centred);
+    const [farFocus, setFarFocus] = useState(centred);
     const [notice, setNotice] = useState(null);
-    const input = useRef();
+    // Kept here rather than in the bulk view so switching tabs keeps the list.
+    const [bulkQueue] = useState(() => new BulkQueue({
+        convert: convertImage,
+        probe: (file) => probeImage(file, {thumbnailSize: bulkThumbnailSize}),
+    }));
+
+    const mipTrick = mode === modeMipTrick;
 
     // Rejects unsupported files here, where the reason can still be shown.
-    const accept = (setter) => (selected) => {
+    const accept = (onAccepted) => (selected) => {
         if (!acceptedTypes.includes(selected.type)) {
             setNotice(`${selected.name} is not a ${acceptedNames} image`);
             return;
         }
         setNotice(null);
-        setter(selected);
+        onAccepted(selected);
     };
-    const selectFile = accept(setFile);
-    const selectFarFile = accept(setFarFile);
+    const selectFile = accept((selected) => {
+        setFile(selected);
+        setFocus(centred);
+    });
+    const selectFarFile = accept((selected) => {
+        setFarFile(selected);
+        setFarFocus(centred);
+    });
+
+    const probe = useProbe(file);
+    const info = probe.info;
+    const farProbe = useProbe(mipTrick ? farFile : null);
+
+    const candidates = useMemo(
+        () => info ? listCandidates(info.width, info.height, info.durations, {useMips: mipTrick, fit}) : [],
+        [info, mipTrick, fit]);
+    const choice = candidateChoices.find(c => c.key === choiceKey);
 
     const job = useMemo(() => {
         if (!file) return null;
-        if (mode === modeMipTrick && !farFile) return null;
+        if (mipTrick && !farFile) return null;
         return {
             file,
             options: {
-                preference,
-                keepAllFrames,
-                mipTrick: mode === modeMipTrick ? {file: farFile, swapPixels} : null,
+                preference: choice.preference,
+                keepAllFrames: choice.keepAllFrames,
+                fit,
+                focus,
+                mipTrick: mipTrick ? {file: farFile, swapPixels, focus: farFocus} : null,
             },
         };
-    }, [mode, file, farFile, swapPixels, preference, keepAllFrames]);
+    }, [file, farFile, mipTrick, swapPixels, choice, fit, focus, farFocus]);
 
     const {status, progress, result, error} = useConversion(job);
-    const done = status === "done";
-
+    const converting = status === "converting";
     const baseName = file ? baseNameOf(file) : null;
 
-    const converting = status === "converting";
-    const waitingForFar = mode === modeMipTrick && !!file && !farFile;
+    // Shown under the header whatever the view, so work in progress is never missed.
+    const bulkSnapshot = useSyncExternalStore(bulkQueue.subscribe, bulkQueue.getSnapshot);
+    const activity = mode === modeBulk ? bulkActivity(bulkSnapshot) : converting ? progress : null;
 
     return (
-        <>
-            <main className="flex grow flex-col items-center justify-center"
-                 onDragOver={(event) => event.preventDefault()}
-                 onDrop={(event) => {
-                     if (mode !== modeSingle) return;
-                     event.preventDefault();
-                     const dropped = firstFile(event.dataTransfer.files);
-                     if (dropped) selectFile(dropped);
-                 }}>
-                <div className="mb-6 flex gap-2">
-                    {[[modeSingle, "Single Image"], [modeMipTrick, "Mip Trick"]].map(([value, label]) => (
-                        <button key={value} type="button"
-                                className={`cursor-pointer rounded-xs px-4 py-2 ${mode === value ? "bg-blue-600 text-white" : "bg-neutral-200 text-neutral-800"}`}
-                                onClick={() => setMode(value)}>
-                            {label}
-                        </button>
-                    ))}
+        <div className="flex grow flex-col"
+             onDragOver={(event) => event.preventDefault()}
+             onDrop={(event) => {
+                 event.preventDefault();
+                 if (mode === modeBulk) return;
+                 const dropped = event.dataTransfer.files?.[0];
+                 if (dropped) selectFile(dropped);
+             }}>
+            <header className="sticky top-0 z-10 border-b border-zinc-300 bg-plaster/95 backdrop-blur dark:border-zinc-800 dark:bg-concrete/95">
+                <div className="mx-auto flex max-w-7xl flex-wrap items-end justify-between gap-4 px-6 pt-4 pb-3">
+                    <div>
+                        <h1 className="font-stencil text-4xl leading-none font-extrabold text-ink dark:text-zinc-100">Spray Converter</h1>
+                        <p className="mt-1 text-sm text-steel dark:text-zinc-400">Turn images and GIFs into Team Fortress 2 sprays</p>
+                    </div>
+                    <div className="flex gap-1" role="tablist">
+                        {modes.map(([value, label]) => (
+                            <button key={value} type="button" role="tab" aria-selected={mode === value}
+                                    className={`cursor-pointer rounded-sm px-3 py-1 font-display text-lg font-semibold ${mode === value ? "bg-ink text-plaster dark:bg-zinc-100 dark:text-concrete" : "text-zinc-600 hover:bg-zinc-300/60 dark:text-zinc-300 dark:hover:bg-zinc-800"}`}
+                                    onClick={() => setMode(value)}>
+                                {label}
+                            </button>
+                        ))}
+                    </div>
                 </div>
+                <div className="h-0.5">
+                    {activity !== null && (
+                        <div className="h-full bg-paint" style={{width: `${Math.max(2, Math.round(activity * 100))}%`}}/>
+                    )}
+                </div>
+            </header>
 
-                {mode === modeSingle ? (
-                    <>
-                        <h1 className="text-3xl font-bold">
-                            {converting ? `Converting ${file.name}` : "Drag and Drop Image"}
-                        </h1>
-                        <FileInput inputRef={input} onSelect={selectFile}/>
-                        <button type="button"
-                                className="mt-2 cursor-pointer rounded-xs bg-blue-600 px-6 py-3 text-white"
-                                onClick={() => input.current.click()}>
-                            Upload Image
-                        </button>
-                    </>
-                ) : (
-                    <>
-                        <h1 className="text-3xl font-bold">
-                            {converting ? `Converting ${file.name}` : "Two Images, One Spray"}
-                        </h1>
-                        <p className="mt-1 max-w-lg text-center text-sm opacity-70">
-                            The close up image lives in the top mips, the distant image takes over
-                            below the swap size and fills every mip under it.
-                        </p>
-                        <div className="mt-4 flex gap-4">
-                            <DropZone label="Close up" hint="drop the near image" file={file} onSelect={selectFile}/>
-                            <DropZone label="Distant" hint="drop the far image" file={farFile} onSelect={selectFarFile}/>
-                        </div>
-                        <Select label="Swap when the spray is under"
-                                value={swapPixels}
-                                options={swapOptions.map(({pixels, label, hint}) => ({value: pixels, label: `${label} — ${hint}`}))}
-                                onChange={(value) => setSwapPixels(Number(value))}/>
-                        {waitingForFar && <div className="mt-2 text-sm opacity-70">Waiting for the distant image</div>}
-                    </>
-                )}
-
-                <Select label="When it will not all fit" className="text-sm"
-                        value={preference} options={preferenceOptions} onChange={setPreference}/>
-                <label className="mt-2 flex items-center gap-2 text-sm"
-                       title="TF2 plays sprays at 5 frames per second, so extra frames make the animation slower">
-                    <input type="checkbox" checked={keepAllFrames} onChange={(event) => setKeepAllFrames(event.target.checked)}/>
-                    <span>Keep every frame (plays slower than the original)</span>
-                </label>
-
-                {notice && <div className="mt-4 text-red-600">{notice}</div>}
-                {status === "error" && <div className="mt-4 text-red-600">Failed to convert image: {error.message}</div>}
-                {(converting || done) && (
-                    <div className="mt-6 flex flex-col gap-4">
-                        <progress className="w-64 bg-neutral-50" max={1} value={progress}/>
-                        {done && <Summary result={result}/>}
-                        {done && (
+            {mode === modeBulk ? <Bulk queue={bulkQueue}/> : (
+                <main className="mx-auto grid w-full max-w-7xl grow items-start gap-6 p-6 md:grid-cols-[minmax(14rem,18rem)_minmax(0,1fr)] lg:grid-cols-[minmax(14rem,18rem)_minmax(0,1fr)_minmax(14rem,18rem)]">
+                    <Panel title="Source">
+                        <DropZone label={mipTrick ? "Close up" : "Image"} hint="drop or choose an image"
+                                  file={file} onSelect={selectFile} compact={!!info}/>
+                        {info && <SourceThumbnail info={info} fit={fit} focus={focus} onFocus={setFocus}/>}
+                        {probe.status === "error" && <div className="text-sm text-alarm">Could not read {file.name}: {probe.error.message}</div>}
+                        {mipTrick && (
                             <>
-                                <DownloadButton name={`${baseName}.vtf`} blob={() => result.blob}/>
-                                <DownloadButton name={`${baseName}.vmt`}
-                                                blob={() => new Blob([buildVMT(baseName)], {type: "text/plain"})}/>
+                                <DropZone label="Distant" hint="shown once the spray is small on screen"
+                                          file={farFile} onSelect={selectFarFile} compact/>
+                                {farProbe.info && <SourceThumbnail info={farProbe.info} fit={fit} focus={farFocus} onFocus={setFarFocus}/>}
+                                {farProbe.status === "error" && <div className="text-sm text-alarm">Could not read {farFile.name}: {farProbe.error.message}</div>}
+                                <label className="flex flex-col gap-1 text-sm">
+                                    <Label>Swap to the distant image under</Label>
+                                    <select className="rounded-xs border border-zinc-400 bg-transparent px-2 py-1"
+                                            value={swapPixels} onChange={(event) => setSwapPixels(Number(event.target.value))}>
+                                        {swapOptions.map(({pixels, label, hint}) => <option key={pixels} value={pixels}>{label} — {hint}</option>)}
+                                    </select>
+                                </label>
                             </>
                         )}
-                    </div>
-                )}
-            </main>
-            <footer className="py-4 text-center text-sm opacity-70">
-                Spray Converter · <a href={siteUrl} className="underline">azuisleet.github.io</a>
-                {" · "}<a href={sourceUrl} className="underline">source</a>
+                        <div className="flex flex-col gap-1">
+                            <Label>Fit to the square spray</Label>
+                            <FitControl fit={fit} onChange={setFit}/>
+                        </div>
+                        {notice && <div className="text-sm text-alarm">{notice}</div>}
+                    </Panel>
+
+                    <Panel title="Preview">
+                        <Preview result={result} converting={converting} progress={progress}
+                                 emptyText={mipTrick && file && !farFile
+                                     ? "Add the distant image to make the spray"
+                                     : `Drop a ${acceptedNames} anywhere to make a spray`}/>
+                        {status === "error" && <div className="text-sm text-alarm">Failed to convert: {error.message}</div>}
+                    </Panel>
+
+                    <Panel title="Spray">
+                        {!file && <p className="text-sm text-zinc-500 dark:text-zinc-400">Size and frame options appear here once there is an image.</p>}
+                        <ChoicePicker candidates={candidates} selected={choiceKey} onSelect={setChoiceKey}/>
+                        {status === "done" && <OutputPanel result={result} baseName={baseName}/>}
+                        {converting && (
+                            <div className="flex flex-col gap-2 border-l-4 border-paint py-1 pl-3" aria-live="polite">
+                                <div className="flex items-center gap-2 font-display text-lg font-semibold">
+                                    <Spinner className="h-4 w-4 text-paint-strong"/>
+                                    Converting
+                                    <span className="ml-auto tabular-nums">{Math.round(progress * 100)}%</span>
+                                </div>
+                                <ProgressBar value={progress}/>
+                            </div>
+                        )}
+                    </Panel>
+                </main>
+            )}
+
+            <footer className="mx-auto flex w-full max-w-7xl flex-wrap justify-between gap-2 border-t border-zinc-300 px-6 py-4 text-sm text-steel dark:border-zinc-800 dark:text-zinc-400">
+                <span>Nothing is uploaded: every image is converted on this device.</span>
+                <span className="flex gap-4">
+                    <a href={siteUrl} className="underline decoration-paint decoration-2 underline-offset-4 hover:text-ink dark:hover:text-zinc-100">azuisleet.github.io</a>
+                    <a href={sourceUrl} className="underline decoration-paint decoration-2 underline-offset-4 hover:text-ink dark:hover:text-zinc-100">Source code</a>
+                </span>
             </footer>
-        </>
+        </div>
     )
 }
 

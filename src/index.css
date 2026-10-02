@@ -1,1 +1,63 @@
 @import "tailwindcss";
+
+/*
+ * The wall is the subject: plaster and concrete greys, a spray-can yellow for anything
+ * active, a muted steel blue for secondary text. Red is kept for errors.
+ */
+@theme {
+    --font-display: "Big Shoulders Display Variable", ui-sans-serif, system-ui, sans-serif;
+    --font-stencil: "Big Shoulders Stencil Display Variable", "Big Shoulders Display Variable", ui-sans-serif, sans-serif;
+
+    --color-plaster: #e4e2dc;
+    --color-concrete: #1d2023;
+    --color-ink: #23272b;
+    --color-steel: #5b7183;
+    --color-paint: #ebb02e;
+    --color-paint-strong: #d39a1a;
+    --color-alarm: #b23a3a;
+}
+
+/* Fine grain shared by both walls; the colour comes from the background underneath. */
+@utility wall-grain {
+    background-image:
+        url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='180' height='180'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='3' stitchTiles='stitch'/%3E%3CfeColorMatrix values='0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0.22 0'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E"),
+        radial-gradient(ellipse at 20% 15%, rgb(255 255 255 / 0.10), transparent 55%),
+        radial-gradient(ellipse at 85% 80%, rgb(0 0 0 / 0.12), transparent 60%);
+}
+
+@utility wall-light {
+    background-color: #b8b5ad;
+    @apply wall-grain;
+}
+
+@utility wall-dark {
+    background-color: #3b3e41;
+    @apply wall-grain;
+}
+
+@utility checker {
+    background-image: repeating-conic-gradient(#d4d4d8 0 25%, #f4f4f5 0 50%);
+    background-size: 24px 24px;
+}
+
+@layer base {
+    h1, h2, h3 {
+        font-family: var(--font-display);
+    }
+
+    input[type="range"], input[type="checkbox"] {
+        accent-color: var(--color-paint);
+    }
+
+    :focus-visible {
+        outline: 2px solid var(--color-paint);
+        outline-offset: 2px;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        *, *::before, *::after {
+            animation-duration: 0.01ms !important;
+            transition-duration: 0.01ms !important;
+        }
+    }
+}

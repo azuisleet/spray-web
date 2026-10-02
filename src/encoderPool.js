@@ -86,9 +86,10 @@ export function createEncoderPool(size) {
          * @param source {pixels, width, height}: unpremultiplied RGBA
          * @param level {width, height, placement: {src, dst}}, as from placeInTexture
          * @param signal optional AbortSignal; aborting drops this level's queued strips
+         * @param onStrip optional, called with the pixel count of each strip as it finishes
          * @returns Promise of the level's DXT1 blocks
          */
-        async render(source, level, signal) {
+        async render(source, level, signal, onStrip) {
             signal?.throwIfAborted();
             const {width, height} = level;
             const stripRows = Math.max(4, Math.floor(pixelsPerTask / width / 4) * 4);
@@ -105,7 +106,10 @@ export function createEncoderPool(size) {
                     level,
                     rowStart,
                     rows,
-                }, [pixels.buffer], signal));
+                }, [pixels.buffer], signal).then(blocks => {
+                    onStrip?.(width * rows);
+                    return blocks;
+                }));
             }
 
             const onAbort = () => cancelQueued(signal);

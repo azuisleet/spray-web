@@ -14,6 +14,8 @@ resizing and compression all happen on your machine.
   than by index.
 - **Mip trick:** a second image that takes over once the spray is far enough away, at a
   distance you choose.
+- **Bulk:** drop many files or whole folders, convert them with shared settings (each file
+  can have its own), and download them all as one zip.
 - Writes a `.vtf` (DXT1 with 1-bit alpha) and a matching `.vmt`.
 
 To use a spray, import the `.vtf` through TF2's spray import, or copy the `.vtf` and `.vmt`
@@ -30,7 +32,9 @@ into `tf/materials/vgui/logos/`.
 | `src/encoderPool.js`, `src/encoderWorker.js` | Resizes and encodes in Web Workers, split into strips so a single image uses every core. |
 | `src/convert.js` | The pipeline, with progress and cancellation. |
 | `src/vtf.js` | VTF header and VMT. |
-| `src/App.jsx`, `src/useConversion.js` | The interface. Changing a setting cancels the running conversion and starts again. |
+| `src/App.jsx`, `src/components/` | The interface: source and crop, a preview of the actual output at TF2's 5 fps, size and frame choices, downloads. |
+| `src/useConversion.js` | Runs conversions for the interface; changing a setting cancels the running one and starts again. |
+| `src/bulkQueue.js`, `src/zip.js` | Bulk mode's queue, which converts files in turn and redoes only those a change affects, and the zip it downloads as. |
 
 ## Development
 

@@ -21,7 +21,9 @@ const axisSizes = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
 // The engine itself takes any multiple of 4: still and animated test sprays at sizes like
 // 1008x1040, 720x724 and 360x360 (see scripts/test-sprays.mjs) all drew in full in TF2
-// with no resampling. Mip tricks keep to powers of two so every level halves evenly.
+// with no resampling. Not with mips, though: 600x600 and 720x724 test sprays with full mip
+// chains drew with the levels out of alignment, while the 512x512 control was fine, so mip
+// tricks stay at powers of two.
 const blockSizes = Array.from({length: 2048 / 4}, (_, i) => (i + 1) * 4);
 
 // Exponents in chooseTarget's score. At 3 the presets differ clearly without either one
@@ -209,4 +211,46 @@ export function chooseFrameIndices(durations, frames) {
 export function chooseSwapLevel(targetWidth, targetHeight, swapPixels) {
     const mipCount = mipDimensions(targetWidth, targetHeight).length;
     return Math.min(mipCount - 1, Math.max(1, Math.round(Math.log2(Math.max(targetWidth, targetHeight) / swapPixels))));
+}
+
+// The choices offered side by side: each is a preference, or keeping every frame.
+export const candidateChoices = [
+    {key: "detail", label: "Sharpest", preference: preferDetail, keepAllFrames: false},
+    {key: "balanced", label: "Balanced", preference: preferBalanced, keepAllFrames: false},
+    {key: "motion", label: "Smoothest", preference: preferMotion, keepAllFrames: false},
+    {key: "all", label: "Every frame", preference: preferBalanced, keepAllFrames: true},
+];
+
+/**
+ * What each choice would produce for this source, without converting anything.
+ *
+ * @param durations each source frame's display time in ms (one entry for a still)
+ * @returns for each choice: the choice, its target from chooseTarget, how long the spray
+ *          plays in game, and speed (original length over in-game length: above 1 plays
+ *          fast, below 1 slow). A still only gets the balanced choice.
+ */
+export function listCandidates(width, height, durations, {useMips = false, fit = fitPad} = {}) {
+    const animated = durations.length > 1;
+    const sourceSeconds = durations.reduce((sum, d) => sum + d, 0) / 1000;
+
+    return candidateChoices
+        .filter(choice => animated || choice.key === "balanced")
+        .map(choice => {
+            const wanted = targetFrameCount(durations, {keepAllFrames: choice.keepAllFrames});
+            const target = chooseTarget(width, height, wanted, {useMips, preference: choice.preference, fit});
+            const playSeconds = target ? target.frames / engineFrameRate : 0;
+            return {...choice, target, playSeconds, speed: animated && playSeconds ? sourceSeconds / playSeconds : 1};
+        });
+}
+
+/**
+ * The mip level the GPU samples when a spray covers screenPixels on screen, facing the
+ * viewer: the texture's longer side over the screen size, as a power of two. Between whole
+ * levels it blends the two nearest (trilinear filtering), given as lower, upper and the
+ * upper level's share. Anisotropic filtering at a slant keeps finer levels longer.
+ */
+export function mipAt(width, height, mipCount, screenPixels) {
+    const lod = Math.min(mipCount - 1, Math.max(0, Math.log2(Math.max(width, height) / screenPixels)));
+    const lower = Math.floor(lod);
+    return {lod, lower, upper: Math.min(mipCount - 1, lower + 1), blend: lod - lower};
 }

@@ -7,6 +7,11 @@
  * so playback order and any dropped frame are visible; their preview has the frames
  * side by side.
  *
+ * Sprays with mips give every level its own colour and number, so walking away shows
+ * which level is drawn; levels whose sides are not multiples of 4 get magenta in the
+ * padding their DXT1 blocks carry, which should never show. Their preview has the levels
+ * side by side.
+ *
  * Every pattern is drawn in pure colours on black, sharp-edged, so DXT1 keeps it
  * close to exact and any blur or misplacement seen in game is the engine's doing.
  */
@@ -14,7 +19,10 @@ import fs from "fs";
 import path from "path";
 import zlib from "zlib";
 import {decodeDXT1, encodeDXT1} from "../src/dxt1.js";
-import {baseFlags, buildHeader, buildVMT, flagEightBitAlpha, flagNoMip, flagOneBitAlpha, headerSize, maximumSize} from "../src/vtf.js";
+import {
+    baseFlags, buildHeader, buildVMT, dxt1Size, flagEightBitAlpha, flagNoMip, flagOneBitAlpha, headerSize, maximumSize,
+    mipDimensions,
+} from "../src/vtf.js";
 
 const uploadLimit = 512 * 1024;
 const outDir = path.resolve(import.meta.dirname, "..", "test-sprays");
@@ -33,6 +41,12 @@ const sprays = [
     {width: 512, height: 512, alphaFlag: flagOneBitAlpha, note: "ONEBITALPHA, transparent background"},
     {width: 512, height: 512, alphaFlag: flagEightBitAlpha, note: "EIGHTBITALPHA, transparent background"},
     {width: 512, height: 512, alphaFlag: 0, note: "no alpha flag, transparent background"},
+    // Mip chains: the first two halve to sides that are neither powers of two nor whole
+    // blocks (724, 362, 181, ...); the last is the power-of-two control. In TF2 both
+    // non-power-of-two chains drew with their levels out of alignment; the control was fine.
+    {width: 720, height: 724, mips: true, note: "mips, not a power of two, uneven halving: levels misalign in TF2"},
+    {width: 600, height: 600, mips: true, note: "mips, not a power of two: levels misalign in TF2"},
+    {width: 512, height: 512, mips: true, note: "mips, control"},
     {width: 1024, height: 1024, note: "over the limit, expected to be refused"},
 ];
 
@@ -61,7 +75,8 @@ const glyphs = {
     "/": ["00001", "00010", "00010", "00100", "01000", "01000", "10000"],
 };
 
-function drawPattern(width, height, frame, frames, {transparent = false, caption = null} = {}) {
+// A blank RGBA image with the drawing helpers the patterns use.
+function surface(width, height) {
     const pixels = new Uint8Array(width * height * 4);
 
     const set = (x, y, [r, g, b]) => {
@@ -88,6 +103,11 @@ function drawPattern(width, height, frame, frames, {transparent = false, caption
             }
         }
     };
+    return {pixels, set, rect, text, textWidth, ring};
+}
+
+function drawPattern(width, height, frame, frames, {transparent = false, caption = null} = {}) {
+    const {pixels, set, rect, text, textWidth, ring} = surface(width, height);
 
     // A transparent background leaves the pixels at zero: alpha 0, where the wall shows.
     if (!transparent) rect(0, 0, width, height, black);
@@ -186,6 +206,77 @@ function drawPattern(width, height, frame, frames, {transparent = false, caption
     return pixels;
 }
 
+const levelColours = [
+    [200, 30, 30], [230, 120, 0], [200, 190, 0], [40, 160, 40], [0, 150, 150], [40, 80, 220],
+    [130, 50, 200], [200, 60, 150], [120, 120, 120], [60, 60, 60], [255, 255, 255], [0, 0, 0],
+];
+
+/**
+ * One mip level: its own colour, its number and size as large as fit, drawn within the
+ * level's true size. Anything beyond that, out to whole 4x4 blocks, is magenta.
+ */
+function drawMipLevel(level, width, height) {
+    const blocksWidth = Math.max(4, Math.ceil(width / 4) * 4);
+    const blocksHeight = Math.max(4, Math.ceil(height / 4) * 4);
+    const {pixels, rect, text, textWidth} = surface(blocksWidth, blocksHeight);
+
+    rect(0, 0, blocksWidth, blocksHeight, magenta);
+    const colour = levelColours[level % levelColours.length];
+    rect(0, 0, width, height, colour);
+    const ink = colour[0] + colour[1] + colour[2] > 400 ? black : white;
+
+    const number = String(level);
+    const scale = Math.floor(Math.min(width * 0.6 / (number.length * 6), height * 0.45 / 7));
+    if (scale >= 1) {
+        const size = `${width}x${height}`;
+        const sizeScale = Math.floor(Math.min(width * 0.8 / (size.length * 6), height * 0.12 / 7));
+        const block = 7 * scale + (sizeScale >= 1 ? 9 * sizeScale : 0);
+        const top = Math.round((height - block) / 2);
+        text(number, Math.round((width - textWidth(number, scale)) / 2), top, scale, ink);
+        if (sizeScale >= 1) text(size, Math.round((width - textWidth(size, sizeScale)) / 2), top + 9 * scale, sizeScale, ink);
+    }
+
+    return {pixels, blocksWidth, blocksHeight};
+}
+
+function writeMipSpray(width, height, note) {
+    const name = `spraytest_${width}x${height}_mips`;
+    const dimensions = mipDimensions(width, height);
+    const levels = dimensions.map(([w, h], level) => {
+        const {pixels, blocksWidth, blocksHeight} = drawMipLevel(level, w, h);
+        const blocks = encodeDXT1(blocksWidth, blocksHeight, pixels);
+        if (blocks.length !== dxt1Size(w, h)) throw new Error(`level ${level} is ${blocks.length} bytes, expected ${dxt1Size(w, h)}`);
+        return {w, h, blocksWidth, blocksHeight, blocks};
+    });
+
+    // VTF stores the smallest level first.
+    const vtf = Buffer.concat([
+        buildHeader(width, height, 1, levels.length, baseFlags),
+        ...levels.slice().reverse().map(level => level.blocks),
+    ]);
+    fs.writeFileSync(path.join(outDir, `${name}.vtf`), vtf);
+    fs.writeFileSync(path.join(outDir, `${name}.vmt`), buildVMT(name));
+
+    // Levels side by side at their block size, so any magenta padding is visible.
+    const sheetWidth = levels.reduce((sum, level) => sum + level.blocksWidth + 4, 0);
+    const sheetHeight = levels[0].blocksHeight;
+    const sheet = new Uint8Array(sheetWidth * sheetHeight * 4);
+    let x = 0;
+    for (const level of levels) {
+        const decoded = decodeDXT1(level.blocksWidth, level.blocksHeight, level.blocks);
+        for (let y = 0; y < level.blocksHeight; y++) {
+            sheet.set(decoded.subarray(y * level.blocksWidth * 4, (y + 1) * level.blocksWidth * 4), (y * sheetWidth + x) * 4);
+        }
+        x += level.blocksWidth + 4;
+    }
+    fs.writeFileSync(path.join(outDir, `${name}.png`), encodePNG(sheetWidth, sheetHeight, sheet));
+
+    const fits = vtf.length <= uploadLimit ? "under 512 KiB" : "OVER 512 KiB";
+    const budget = vtf.length - headerSize <= maximumSize ? "" : ", over the converter's budget";
+    console.log(`${name}.vtf  ${vtf.length.toLocaleString().padStart(7)} bytes  ${fits}${budget}  ${levels.length} levels: ` +
+        `${dimensions.map(([w, h]) => `${w}x${h}`).join(" ")}  (${note})`);
+}
+
 function encodePNG(width, height, rgba) {
     const chunk = (type, data) => {
         const length = Buffer.alloc(4);
@@ -218,7 +309,11 @@ function encodePNG(width, height, rgba) {
 
 fs.mkdirSync(outDir, {recursive: true});
 
-for (const {width, height, frames = 1, alphaFlag, note} of sprays) {
+for (const {width, height, frames = 1, alphaFlag, mips, note} of sprays) {
+    if (mips) {
+        writeMipSpray(width, height, note);
+        continue;
+    }
     const alphaTest = alphaFlag !== undefined;
     let name = frames > 1 ? `spraytest_${width}x${height}_${frames}f` : `spraytest_${width}x${height}`;
     if (alphaTest) name += `_alpha${alphaFlag.toString(16)}`;

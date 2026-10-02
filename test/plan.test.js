@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {
     chooseFrameIndices, chooseSwapLevel, chooseTarget, engineFrameRate, fitCrop, fitGeometry, fitPad, fitStretch,
-    placeInTexture, preferBalanced, preferDetail, preferMotion, targetFrameCount,
+    listCandidates, mipAt, placeInTexture, preferBalanced, preferDetail, preferMotion, targetFrameCount,
 } from "../src/plan.js";
 import {dxt1Size, headerSize, maximumSize, mipDimensions} from "../src/vtf.js";
 
@@ -136,5 +136,48 @@ describe("chooseSwapLevel", () => {
     it("stays between the top level and the last", () => {
         expect(chooseSwapLevel(64, 64, 128)).toBe(1);
         expect(chooseSwapLevel(64, 64, 1)).toBe(6);
+    });
+});
+
+describe("listCandidates", () => {
+    const jahy = Array(139).fill(6000 / 139);
+
+    it("offers each choice with what it would make and how fast it plays", () => {
+        const candidates = listCandidates(600, 331, jahy);
+        expect(candidates.map(c => c.key)).toEqual(["detail", "balanced", "motion", "all"]);
+        const balanced = candidates.find(c => c.key === "balanced");
+        expect(`${balanced.target.targetWidth}x${balanced.target.targetHeight}x${balanced.target.frames}`).toBe("236x232x19");
+        expect(balanced.playSeconds).toBeCloseTo(3.8);
+        expect(balanced.speed).toBeCloseTo(6 / 3.8);
+        expect(candidates.find(c => c.key === "all").speed).toBeLessThan(1);
+    });
+
+    it("offers a still just the one answer", () => {
+        const candidates = listCandidates(1000, 1000, [0]);
+        expect(candidates.length).toBe(1);
+        expect(candidates[0].target.frames).toBe(1);
+        expect(candidates[0].speed).toBe(1);
+    });
+});
+
+describe("mipAt", () => {
+    it("draws the top level at full size and halves per level", () => {
+        expect(mipAt(256, 256, 9, 256)).toMatchObject({lower: 0, blend: 0});
+        expect(mipAt(256, 256, 9, 64)).toMatchObject({lower: 2, upper: 3, blend: 0});
+    });
+
+    it("blends between levels in between", () => {
+        const mip = mipAt(256, 256, 9, 90.5);
+        expect([mip.lower, mip.upper]).toEqual([1, 2]);
+        expect(mip.blend).toBeCloseTo(0.5, 2);
+    });
+
+    it("follows the longer side of a rectangular texture", () => {
+        expect(mipAt(128, 256, 9, 64).lower).toBe(2);
+    });
+
+    it("stays within the chain", () => {
+        expect(mipAt(256, 256, 9, 1024)).toMatchObject({lower: 0, blend: 0});
+        expect(mipAt(256, 256, 9, 0.25)).toMatchObject({lower: 8, upper: 8});
     });
 });

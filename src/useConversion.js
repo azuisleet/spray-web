@@ -1,5 +1,5 @@
 import {useEffect, useState} from "react";
-import {convertImage} from "./convert.js";
+import {convertImage, probeImage} from "./convert.js";
 
 // Long enough to coalesce a burst of setting changes, short enough to feel immediate.
 const debounceMs = 150;
@@ -63,4 +63,32 @@ export function downloadBlob(blob, name) {
     link.click();
     // The download has its own reference by the time this runs.
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
+}
+
+/**
+ * Probes file for the planner and a thumbnail, as {status, info, error}. Resolves to the
+ * same shape for the same file, so callers can memoise on info.
+ */
+export function useProbe(file) {
+    const [state, setState] = useState({file: null, info: null, error: null});
+
+    useEffect(() => {
+        if (!file) return;
+        const controller = new AbortController();
+        probeImage(file, {signal: controller.signal})
+            .then(info => {
+                if (controller.signal.aborted) info.thumbnail?.close();
+                else setState({file, info, error: null});
+            })
+            .catch(error => {
+                if (!controller.signal.aborted) setState({file, info: null, error});
+            });
+        return () => controller.abort();
+    }, [file]);
+
+    // Thumbnails are left to garbage collection: closing one when its probe is replaced
+    // would also close it under StrictMode's rehearsal unmount, while it is still shown.
+    if (!file) return {status: "idle", info: null, error: null};
+    if (state.file !== file) return {status: "probing", info: null, error: null};
+    return state.error ? {status: "error", info: null, error: state.error} : {status: "done", info: state.info, error: null};
 }

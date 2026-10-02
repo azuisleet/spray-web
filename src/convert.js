@@ -1,6 +1,9 @@
 import {openImage} from "./decode.js";
 import {getEncoderPool} from "./encoderPool.js";
-import {chooseFrameIndices, chooseSwapLevel, chooseTarget, fitGeometry, fitPad, placeInTexture, preferBalanced} from "./plan.js";
+import {
+    chooseFrameIndices, chooseSwapLevel, chooseTarget, engineFrameRate, fitGeometry, fitPad, placeInTexture,
+    preferBalanced, targetFrameCount,
+} from "./plan.js";
 import {baseFlags, buildHeader, flagNoMip, headerSize, mipDimensions} from "./vtf.js";
 
 // Levels under 4x4 still cost a whole DXT1 block, so they are drawn at 4x4.
@@ -29,10 +32,13 @@ function yieldToEventLoop() {
  *   preference preferBalanced, preferDetail or preferMotion, for when it will not all fit
  *   fit        fitPad, fitCrop or fitStretch: how the image meets the square decal
  *   focus      {x, y} in 0..1, which part of the image a crop keeps
+ *   keepAllFrames  plan for every source frame rather than for real-time playback at
+ *              the engine's 5 fps; the spray then plays slower than the original
  *   signal     AbortSignal; aborting rejects with signal.reason
  *   onProgress called with 0..1
  * @returns {blob, levels, width, height, frames, sourceFrames, mipCount, padding, bytes,
- *           swapLevel, swapDimension}, where levels[level][frame] is the DXT1 data
+ *           swapLevel, swapDimension, playSeconds, sourceSeconds}, where
+ *           levels[level][frame] is the DXT1 data
  */
 export async function convertImage(file, options = {}) {
     const {
@@ -40,6 +46,7 @@ export async function convertImage(file, options = {}) {
         preference = preferBalanced,
         fit = fitPad,
         focus,
+        keepAllFrames = false,
         signal,
         onProgress = () => {},
     } = options;
@@ -56,16 +63,21 @@ export async function convertImage(file, options = {}) {
         const {width, height, frameCount} = image;
         const useMips = !!farImage;
 
-        const target = chooseTarget(width, height, frameCount, {useMips, preference, fit});
+        // For some decoders the timings cost a pass of their own, so a still skips them.
+        const durations = frameCount > 1 ? await image.durations() : [0];
+        signal?.throwIfAborted();
+        const wantedFrames = targetFrameCount(durations, {keepAllFrames});
+
+        const target = chooseTarget(width, height, wantedFrames, {useMips, preference, fit});
         if (!target) throw new Error("Image cannot be fit inside the 512 KB spray limit");
 
         const {targetWidth, targetHeight, frames: nFrames} = target;
 
-        // Only read the timings when frames actually have to be dropped; for some decoders
-        // that costs a pass of its own.
-        const frameIndices = nFrames < frameCount
-            ? chooseFrameIndices(await image.durations(), nFrames)
-            : Array.from({length: nFrames}, (_, i) => i);
+        // Keeping every frame means one slot each, in order; otherwise slots are chosen by
+        // time, which drops or repeats frames to match the engine's fixed rate.
+        const frameIndices = keepAllFrames && nFrames === frameCount
+            ? Array.from({length: nFrames}, (_, i) => i)
+            : chooseFrameIndices(durations, nFrames);
 
         const levelDimensions = useMips ? mipDimensions(targetWidth, targetHeight) : [[targetWidth, targetHeight]];
         const mipCount = levelDimensions.length;
@@ -151,6 +163,8 @@ export async function convertImage(file, options = {}) {
             bytes: target.cost + headerSize,
             swapLevel: useMips ? swapLevel : null,
             swapDimension: useMips ? Math.max(...levelDimensions[swapLevel]) : null,
+            playSeconds: nFrames / engineFrameRate,
+            sourceSeconds: durations.reduce((sum, d) => sum + d, 0) / 1000,
         };
     } finally {
         image?.close();

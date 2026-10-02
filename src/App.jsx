@@ -83,7 +83,10 @@ function Select({label, value, options, onChange, className = ""}) {
 
 function Summary({result}) {
     const parts = [`${result.width}×${result.height}`];
-    if (result.sourceFrames > 1) parts.push(`${result.frames}/${result.sourceFrames} frames`);
+    if (result.sourceFrames > 1) {
+        parts.push(`${result.frames} frames from ${result.sourceFrames}`);
+        parts.push(`plays in ${result.playSeconds.toFixed(1)} s (original ${result.sourceSeconds.toFixed(1)} s)`);
+    }
     if (result.padding > 0.005) parts.push(`${Math.round(result.padding * 100)}% padding`);
     parts.push(`${result.bytes.toLocaleString()} bytes`);
     if (result.swapLevel !== null) parts.push(`distant image from mip ${result.swapLevel} (${result.swapDimension} px) down`);
@@ -104,6 +107,7 @@ function App() {
     const [farFile, setFarFile] = useState(null);
     const [swapPixels, setSwapPixels] = useState(64);
     const [preference, setPreference] = useState(preferBalanced);
+    const [keepAllFrames, setKeepAllFrames] = useState(false);
     const [notice, setNotice] = useState(null);
     const input = useRef();
 
@@ -126,10 +130,11 @@ function App() {
             file,
             options: {
                 preference,
+                keepAllFrames,
                 mipTrick: mode === modeMipTrick ? {file: farFile, swapPixels} : null,
             },
         };
-    }, [mode, file, farFile, swapPixels, preference]);
+    }, [mode, file, farFile, swapPixels, preference, keepAllFrames]);
 
     const {status, progress, result, error} = useConversion(job);
     const done = status === "done";
@@ -194,6 +199,11 @@ function App() {
 
                 <Select label="When it will not all fit" className="text-sm"
                         value={preference} options={preferenceOptions} onChange={setPreference}/>
+                <label className="mt-2 flex items-center gap-2 text-sm"
+                       title="TF2 plays sprays at 5 frames per second, so extra frames make the animation slower">
+                    <input type="checkbox" checked={keepAllFrames} onChange={(event) => setKeepAllFrames(event.target.checked)}/>
+                    <span>Keep every frame (plays slower than the original)</span>
+                </label>
 
                 {notice && <div className="mt-4 text-red-600">{notice}</div>}
                 {status === "error" && <div className="mt-4 text-red-600">Failed to convert image: {error.message}</div>}

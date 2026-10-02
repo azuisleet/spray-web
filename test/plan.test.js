@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {
-    chooseFrameIndices, chooseSwapLevel, chooseTarget, fitCrop, fitGeometry, fitPad, fitStretch,
-    placeInTexture, preferBalanced, preferDetail, preferMotion,
+    chooseFrameIndices, chooseSwapLevel, chooseTarget, engineFrameRate, fitCrop, fitGeometry, fitPad, fitStretch,
+    placeInTexture, preferBalanced, preferDetail, preferMotion, targetFrameCount,
 } from "../src/plan.js";
 import {dxt1Size, headerSize, maximumSize, mipDimensions} from "../src/vtf.js";
 
@@ -13,8 +13,8 @@ describe("chooseTarget", () => {
         ["keeps a small still at its own size", [300, 300, 1], "300x300x1"],
         ["gives a large still the tested 1024x1020", [4000, 4000, 1], "1024x1020x1"],
         ["pads a 2:1 still into the square it needs", [800, 400, 1], "800x800x1"],
-        ["balances a long animation", [640, 360, 300], "132x128x62"],
-        ["balances a short animation", [498, 280, 25], "272x272x14"],
+        ["balances a long animation", [640, 360, 300], "92x92x123"],
+        ["balances a short animation", [498, 280, 25], "240x240x18"],
     ])("%s", (name, [width, height, frames], expected) => {
         expect(size(chooseTarget(width, height, frames))).toBe(expected);
     });
@@ -40,7 +40,7 @@ describe("chooseTarget", () => {
 
     it("orders the presets: resolution keeps fewest frames, motion the most", () => {
         const frames = [preferDetail, preferBalanced, preferMotion].map(preference => chooseTarget(600, 331, 139, {preference}).frames);
-        expect(frames).toEqual([13, 38, 83]);
+        expect(frames).toEqual([13, 68, 83]);
     });
 
     it("never turns an animation into a still", () => {
@@ -82,6 +82,31 @@ describe("fitGeometry and placeInTexture", () => {
     });
 });
 
+describe("targetFrameCount", () => {
+    it("wants 5 frames per second of animation, the engine's fixed rate", () => {
+        expect(targetFrameCount(Array(139).fill(6000 / 139))).toBe(30);
+        expect(targetFrameCount(Array(25).fill(100))).toBe(13);
+    });
+
+    it("wants repeats of a long-held frame rather than speeding it up", () => {
+        expect(targetFrameCount([200, 3000, 200])).toBe(17);
+    });
+
+    it("wants one frame for a still and at least two for any animation", () => {
+        expect(targetFrameCount([100])).toBe(1);
+        expect(targetFrameCount([20, 20])).toBe(2);
+    });
+
+    it("wants every source frame when asked to keep them all", () => {
+        expect(targetFrameCount(Array(139).fill(40), {keepAllFrames: true})).toBe(139);
+    });
+
+    it("plans no more frames than wanted, however much room there is", () => {
+        expect(chooseTarget(64, 64, 13).frames).toBe(13);
+        expect(engineFrameRate).toBe(5);
+    });
+});
+
 describe("chooseFrameIndices", () => {
     it("decimates even delays evenly", () => {
         expect(chooseFrameIndices(Array(10).fill(100), 5)).toEqual([0, 2, 4, 6, 8]);
@@ -95,6 +120,10 @@ describe("chooseFrameIndices", () => {
 
     it("keeps every frame when there is room", () => {
         expect(chooseFrameIndices([30, 70, 50], 3)).toEqual([0, 1, 2]);
+    });
+
+    it("repeats frames when more slots are wanted than there are frames", () => {
+        expect(chooseFrameIndices([200, 600, 200], 5)).toEqual([0, 1, 1, 1, 2]);
     });
 });
 

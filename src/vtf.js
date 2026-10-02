@@ -7,12 +7,16 @@ const flagClampS = 0x0004;
 const flagClampT = 0x0008;
 export const flagNoMip = 0x0100;
 const flagNoLod = 0x0200;
-const flagEightBitAlpha = 0x2000;
+// vtex sets one of these from the texture data: ONEBITALPHA for 1-bit alpha like ours,
+// EIGHTBITALPHA for anything finer. Test sprays with either flag, or neither, looked the
+// same in TF2 (scripts/test-sprays.mjs), so the spray says what it actually holds.
+export const flagOneBitAlpha = 0x1000;
+export const flagEightBitAlpha = 0x2000;
 
 // NOLOD keeps the texture out of the picmip/texture-quality path so a mip trick lands
 // at the same distance for everyone. Valve sets NOMIP|NOLOD on every runtime-built
 // UI texture in the SDK, so this pairing is the house style.
-export const baseFlags = flagClampS | flagClampT | flagNoLod | flagEightBitAlpha;
+export const baseFlags = flagClampS | flagClampT | flagNoLod | flagOneBitAlpha;
 
 // Budget for the DXT1 payload; the header fits in what is left of the 512 KB upload limit.
 // A spray filling it exactly (1008x1040, 524,224 bytes with header) works in TF2, and

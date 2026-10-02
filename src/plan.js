@@ -24,16 +24,22 @@ const axisSizes = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 // with no resampling. Mip tricks keep to powers of two so every level halves evenly.
 const blockSizes = Array.from({length: 2048 / 4}, (_, i) => (i + 1) * 4);
 
-// Exponents in chooseTarget's score. At 3 the presets differ clearly (a 139 frame GIF
-// gets 13, 38 or 83 frames) without either one collapsing to an extreme.
+// Exponents in chooseTarget's score. At 3 the presets differ clearly without either one
+// collapsing to an extreme. Balanced leans a little towards timing, since an animation
+// playing too fast is more noticeable than a little lost resolution.
 const preferenceWeights = {
     [preferDetail]: {detail: 3, motion: 1},
-    [preferBalanced]: {detail: 1, motion: 1},
+    [preferBalanced]: {detail: 1, motion: 2},
     [preferMotion]: {detail: 1, motion: 3},
 };
 
 // An animated source never comes out as a still, however hard resolution is favoured.
 const minimumAnimatedFrames = 2;
+
+// Sprays are drawn with TF2's decals/playerlogoNN materials (c_te_playerdecal.cpp in the
+// SDK), whose AnimatedTexture proxy sets animatedtextureframerate 5. The spray's own VMT
+// plays no part.
+export const engineFrameRate = 5;
 
 function payloadPerFrame(width, height, useMips) {
     if (!useMips) return dxt1Size(width, height);
@@ -84,6 +90,22 @@ export function placeInTexture(geometry, width, height) {
 }
 
 /**
+ * How many frames the spray wants: enough for the engine's fixed 5 fps to play the
+ * animation at its real speed, since every frame beyond that slows it down and every one
+ * short of it speeds it up. A long-held frame is repeated to keep its time. With
+ * keepAllFrames the source frames are wanted one for one instead, at whatever speed
+ * that plays.
+ *
+ * @param durations each source frame's display time in ms
+ */
+export function targetFrameCount(durations, {keepAllFrames = false} = {}) {
+    if (durations.length <= 1) return 1;
+    if (keepAllFrames) return durations.length;
+    const seconds = durations.reduce((sum, d) => sum + d, 0) / 1000;
+    return Math.max(minimumAnimatedFrames, Math.round(seconds * engineFrameRate));
+}
+
+/**
  * Picks the texture size and frame count together. Enumerating the candidates beats
  * deriving one answer because the good choice depends on how the two trade off, and
  * the space is small enough to search in a few milliseconds.
@@ -93,10 +115,12 @@ export function placeInTexture(geometry, width, height) {
  * the two would not work: along the size limit, halving the frames buys twice the texels,
  * so the product is flat and the choice comes down to rounding.
  *
+ * @param wantedFrames from targetFrameCount; never exceeded, and motion is measured
+ *        against it
  * @returns {targetWidth, targetHeight, frames, detail, motion, waste, cost, ...} or null
  *          when nothing fits
  */
-export function chooseTarget(width, height, frameCount, {useMips = false, preference = preferBalanced, fit = fitPad} = {}) {
+export function chooseTarget(width, height, wantedFrames, {useMips = false, preference = preferBalanced, fit = fitPad} = {}) {
     const weights = preferenceWeights[preference] || preferenceWeights[preferBalanced];
     const {source, decal} = fitGeometry(width, height, fit);
     const sourceWidth = source.x1 - source.x0;
@@ -112,8 +136,8 @@ export function chooseTarget(width, height, frameCount, {useMips = false, prefer
             const affordable = Math.floor(maximumSize / perFrame);
             if (affordable < 1) continue;
 
-            const frames = Math.min(frameCount, affordable);
-            if (frames < Math.min(frameCount, minimumAnimatedFrames)) continue;
+            const frames = Math.min(wantedFrames, affordable);
+            if (frames < Math.min(wantedFrames, minimumAnimatedFrames)) continue;
 
             // Texels the image covers on each axis against the source pixels there, capped at
             // 1 because upscaling adds nothing. Their product is the fraction of source pixels kept.
@@ -125,7 +149,7 @@ export function chooseTarget(width, height, frameCount, {useMips = false, prefer
             // The blurrier axis is what you see, so a lopsided texture only helps once the
             // other axis already holds the source at full resolution.
             const resolution = Math.min(detailX, detailY);
-            const motion = frames / frameCount;
+            const motion = frames / wantedFrames;
             const resolutionTerm = resolution ** weights.detail;
             const motionTerm = motion ** weights.motion;
             const score = Math.min(resolutionTerm, motionTerm);
@@ -156,6 +180,7 @@ export function chooseTarget(width, height, frameCount, {useMips = false, prefer
 // VTF has nowhere to store per-frame timing, so the engine plays frames at a fixed rate.
 // Selecting by elapsed time rather than by index is what keeps a variable-delay GIF from
 // being retimed, and it repeats a long-held frame across slots instead of dropping it.
+// frames may be more than durations.length; source frames then repeat.
 export function chooseFrameIndices(durations, frames) {
     const total = durations.reduce((sum, d) => sum + d, 0);
     const indices = [];

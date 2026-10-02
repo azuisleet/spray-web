@@ -14,7 +14,7 @@ import fs from "fs";
 import path from "path";
 import zlib from "zlib";
 import {decodeDXT1, encodeDXT1} from "../src/dxt1.js";
-import {baseFlags, buildHeader, buildVMT, flagNoMip, headerSize, maximumSize} from "../src/vtf.js";
+import {baseFlags, buildHeader, buildVMT, flagEightBitAlpha, flagNoMip, flagOneBitAlpha, headerSize, maximumSize} from "../src/vtf.js";
 
 const uploadLimit = 512 * 1024;
 const outDir = path.resolve(import.meta.dirname, "..", "test-sprays");
@@ -28,6 +28,11 @@ const sprays = [
     {width: 720, height: 724, frames: 2, note: "animated, neither side a power of two"},
     {width: 360, height: 360, frames: 8, note: "animated, many small frames"},
     {width: 256, height: 256, frames: 8, note: "animated control, powers of two"},
+    // Same transparent-background pattern, differing only in the alpha flag; the caption
+    // shows the flag value. All three looked identical in TF2; the converter writes 0x1000.
+    {width: 512, height: 512, alphaFlag: flagOneBitAlpha, note: "ONEBITALPHA, transparent background"},
+    {width: 512, height: 512, alphaFlag: flagEightBitAlpha, note: "EIGHTBITALPHA, transparent background"},
+    {width: 512, height: 512, alphaFlag: 0, note: "no alpha flag, transparent background"},
     {width: 1024, height: 1024, note: "over the limit, expected to be refused"},
 ];
 
@@ -56,7 +61,7 @@ const glyphs = {
     "/": ["00001", "00010", "00010", "00100", "01000", "01000", "10000"],
 };
 
-function drawPattern(width, height, frame, frames) {
+function drawPattern(width, height, frame, frames, {transparent = false, caption = null} = {}) {
     const pixels = new Uint8Array(width * height * 4);
 
     const set = (x, y, [r, g, b]) => {
@@ -84,7 +89,8 @@ function drawPattern(width, height, frame, frames) {
         }
     };
 
-    rect(0, 0, width, height, black);
+    // A transparent background leaves the pixels at zero: alpha 0, where the wall shows.
+    if (!transparent) rect(0, 0, width, height, black);
 
     // Grid every 64 px, with a white cross through the exact centre.
     for (let x = 64; x < width; x += 64) rect(x, 0, 1, height, grey);
@@ -155,6 +161,13 @@ function drawPattern(width, height, frame, frames) {
     rect(labelX - scale, labelY - scale, textWidth(label, scale) + 2 * scale, 9 * scale, black);
     text(label, labelX, labelY, scale, white);
 
+    if (caption) {
+        const captionX = Math.round((width - textWidth(caption, scale)) / 2);
+        const captionY = labelY + 9 * scale;
+        rect(captionX - scale, captionY - scale, textWidth(caption, scale) + 2 * scale, 9 * scale, black);
+        text(caption, captionX, captionY, scale, white);
+    }
+
     if (frames > 1) {
         const counter = `${frame + 1}/${frames}`;
         const counterX = Math.round((width - textWidth(counter, scale)) / 2);
@@ -205,11 +218,18 @@ function encodePNG(width, height, rgba) {
 
 fs.mkdirSync(outDir, {recursive: true});
 
-for (const {width, height, frames = 1, note} of sprays) {
-    const name = frames > 1 ? `spraytest_${width}x${height}_${frames}f` : `spraytest_${width}x${height}`;
+for (const {width, height, frames = 1, alphaFlag, note} of sprays) {
+    const alphaTest = alphaFlag !== undefined;
+    let name = frames > 1 ? `spraytest_${width}x${height}_${frames}f` : `spraytest_${width}x${height}`;
+    if (alphaTest) name += `_alpha${alphaFlag.toString(16)}`;
+    const options = alphaTest ? {transparent: true, caption: `0x${alphaFlag.toString(16)}`} : {};
+    const flags = alphaTest
+        ? (baseFlags & ~(flagOneBitAlpha | flagEightBitAlpha)) | alphaFlag | flagNoMip
+        : baseFlags | flagNoMip;
+
     // Without mips a VTF is simply every frame's top level, one after another.
-    const frameBlocks = Array.from({length: frames}, (_, frame) => encodeDXT1(width, height, drawPattern(width, height, frame, frames)));
-    const vtf = Buffer.concat([buildHeader(width, height, frames, 1, baseFlags | flagNoMip), ...frameBlocks]);
+    const frameBlocks = Array.from({length: frames}, (_, frame) => encodeDXT1(width, height, drawPattern(width, height, frame, frames, options)));
+    const vtf = Buffer.concat([buildHeader(width, height, frames, 1, flags), ...frameBlocks]);
 
     fs.writeFileSync(path.join(outDir, `${name}.vtf`), vtf);
     fs.writeFileSync(path.join(outDir, `${name}.vmt`), buildVMT(name));

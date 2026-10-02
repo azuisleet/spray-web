@@ -1,8 +1,22 @@
+// Browsers do not know VTF; this is its registered type, given to files by their name.
+export const vtfType = "image/vnd.valve.source.texture";
+
 export const acceptedTypes = [
     "image/gif", "image/png", "image/apng", "image/jpeg", "image/webp", "image/avif",
-    "video/mp4", "video/webm", "video/quicktime",
+    "video/mp4", "video/webm", "video/quicktime", vtfType,
 ];
-export const acceptedNames = "GIF, PNG, JPEG, WebP, AVIF, MP4 or WebM";
+export const acceptedNames = "GIF, PNG, JPEG, WebP, AVIF, MP4, WebM or VTF";
+
+// For file pickers, which also need the extension since no browser knows VTF's type.
+export const acceptAttribute = [...acceptedTypes, ".vtf"].join(",");
+
+/** The file with a type a browser leaves out: a VTF arrives typeless. */
+export function withKnownType(file) {
+    if (!file.type && /\.vtf$/i.test(file.name)) return new File([file], file.name, {type: vtfType});
+    return file;
+}
+
+export const isVtf = (file) => file.type === vtfType;
 
 // Clipboard images arrive as "image.png" whatever they are; a timestamp keeps each
 // pasted spray's download name distinct.

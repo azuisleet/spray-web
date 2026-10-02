@@ -1,4 +1,6 @@
+import {vtfType} from "./formats.js";
 import {decodeGifFrames, parseGif} from "./gif.js";
+import {readVTF} from "./vtfRead.js";
 
 // JPEG and friends go through createImageBitmap, which is also what applies EXIF rotation.
 const animatableTypes = ["image/gif", "image/png", "image/apng", "image/webp", "image/avif"];
@@ -30,6 +32,8 @@ export function videoDurations(seconds) {
  *  - Other animated formats (WebP, APNG, AVIF): WebCodecs ImageDecoder where available.
  *  - Everything else, or browsers without ImageDecoder: createImageBitmap, first frame only.
  *  - Video: a <video> element, seeked to each frame's time; trim picks the span used.
+ *  - VTF: its largest mip level, each frame shown for 200 ms (TF2's 5 a second), since
+ *    the format stores no timing.
  *
  * @returns {width, height, frameCount, durations(): Promise<number[]> (ms),
  *           frames(wanted): async iterator of [index, rgba], close()}
@@ -37,6 +41,7 @@ export function videoDurations(seconds) {
  */
 export async function openImage(blob, {nativeGif = false, trim} = {}) {
     if (blob.type.startsWith("video/")) return openVideo(blob, trim);
+    if (blob.type === vtfType) return openVtf(blob);
     if (blob.type === "image/gif" && !nativeGif) return openGif(blob);
     if (animatableTypes.includes(blob.type) && typeof ImageDecoder !== "undefined"
         && await ImageDecoder.isTypeSupported(blob.type)) {
@@ -211,5 +216,29 @@ async function openVideo(blob, trim) {
             video.load();
             URL.revokeObjectURL(url);
         },
+    };
+}
+
+// The engine plays sprays at 5 frames a second, so that is the timing a VTF had.
+const vtfFrameDuration = 200;
+
+async function openVtf(blob) {
+    const vtf = readVTF(await blob.arrayBuffer());
+    const error = vtf.checks.find(check => check.severity === "error");
+    if (error) throw new Error(error.text);
+    return {
+        width: vtf.width,
+        height: vtf.height,
+        frameCount: vtf.frames,
+        durations: async () => Array(vtf.frames).fill(vtfFrameDuration),
+        async* frames(wanted) {
+            let last = -1;
+            for (const index of wanted) {
+                if (index === last) continue;
+                last = index;
+                yield [index, vtf.levels[0][index]];
+            }
+        },
+        close() {},
     };
 }

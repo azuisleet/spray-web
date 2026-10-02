@@ -123,19 +123,20 @@ export function encodeDXT5(width, height, rgba) {
 const expand5 = (v) => (v << 3) | (v >> 2);
 const expand6 = (v) => (v << 2) | (v >> 4);
 
-/** Decodes as the hardware does, for previews and tests. */
-export function decodeDXT5(width, height, data) {
+/**
+ * Decodes 16 byte blocks whose second half is a four colour DXT1 style colour block, with
+ * alphaOf(offset, levels) filling the 16 alphas of the block at offset into levels.
+ */
+function decodeWithAlphaBlock(width, height, data, alphaOf) {
     const out = new Uint8Array(width * height * 4);
     const blocksWide = Math.max(1, width >> 2);
     const blocksHigh = Math.max(1, height >> 2);
-    const levels = new Int32Array(8);
+    const alphasOfBlock = new Int32Array(16);
     const colours = new Int32Array(12);
 
     for (let by = 0, offset = 0; by < blocksHigh; by++) {
         for (let bx = 0; bx < blocksWide; bx++, offset += blockBytes) {
-            fillAlphaPalette(data[offset], data[offset + 1], levels);
-            const low = data[offset + 2] | (data[offset + 3] << 8) | (data[offset + 4] << 16);
-            const high = data[offset + 5] | (data[offset + 6] << 8) | (data[offset + 7] << 16);
+            alphaOf(offset, alphasOfBlock);
 
             const c0 = data[offset + 8] | (data[offset + 9] << 8);
             const c1 = data[offset + 10] | (data[offset + 11] << 8);
@@ -149,15 +150,35 @@ export function decodeDXT5(width, height, data) {
             for (let i = 0; i < 16; i++) {
                 const x = bx * 4 + (i & 3), y = by * 4 + (i >> 2);
                 if (x >= width || y >= height) continue;
-                const alphaIndex = ((i < 8 ? low : high) >> (3 * (i & 7))) & 7;
                 const colourIndex = (colourBits >>> (2 * i)) & 3;
                 const p = (y * width + x) * 4;
                 out[p] = colours[colourIndex * 3];
                 out[p + 1] = colours[colourIndex * 3 + 1];
                 out[p + 2] = colours[colourIndex * 3 + 2];
-                out[p + 3] = levels[alphaIndex];
+                out[p + 3] = alphasOfBlock[i];
             }
         }
     }
     return out;
+}
+
+/** Decodes as the hardware does, for previews and tests. */
+export function decodeDXT5(width, height, data) {
+    const levels = new Int32Array(8);
+    return decodeWithAlphaBlock(width, height, data, (offset, alphas) => {
+        fillAlphaPalette(data[offset], data[offset + 1], levels);
+        const low = data[offset + 2] | (data[offset + 3] << 8) | (data[offset + 4] << 16);
+        const high = data[offset + 5] | (data[offset + 6] << 8) | (data[offset + 7] << 16);
+        for (let i = 0; i < 16; i++) alphas[i] = levels[((i < 8 ? low : high) >> (3 * (i & 7))) & 7];
+    });
+}
+
+/**
+ * DXT3 (BC2), for reading sprays made elsewhere: the same colour block as DXT5, with each
+ * pixel's alpha stored outright in 4 bits instead of interpolated.
+ */
+export function decodeDXT3(width, height, data) {
+    return decodeWithAlphaBlock(width, height, data, (offset, alphas) => {
+        for (let i = 0; i < 16; i++) alphas[i] = ((data[offset + (i >> 1)] >> ((i & 1) * 4)) & 15) * 17;
+    });
 }

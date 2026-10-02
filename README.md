@@ -19,6 +19,9 @@ resizing and compression all happen on your machine.
   when an image has soft edges.
 - **Pixel art:** every pixel kept whole and point sampled so it stays sharp in game, in
   exact colour (uncompressed) when that fits.
+- **Check a spray:** open a `.vtf` to see it as TF2 would (animated, and at a distance if it
+  has mips) with checks against what works: the 512 KB limit, mip chains that misalign,
+  untested formats. "Convert this" turns it into a source, to make it fit or change it.
 - **Bulk:** drop many files or whole folders, convert them with shared settings (each file
   can have its own), and download them all as one zip.
 - Writes a `.vtf` (DXT1, or DXT5 / BGRA8888 for soft edges and pixel art) and a matching `.vmt`.
@@ -38,6 +41,7 @@ into `tf/materials/vgui/logos/`.
 | `src/encoderPool.js`, `src/encoderWorker.js` | Resizes and encodes in Web Workers, split into strips so a single image uses every core. |
 | `src/convert.js` | The pipeline, with progress and cancellation. |
 | `src/vtf.js` | VTF header and VMT. |
+| `src/vtfRead.js` | Reads VTF 7.1 to 7.5 in any of 18 formats, and checks a file against what works as a spray. |
 | `src/App.jsx`, `src/components/` | The interface: source and crop, a preview of the actual output at TF2's 5 fps, size and frame choices, downloads. |
 | `src/useConversion.js` | Runs conversions for the interface; changing a setting cancels the running one and starts again. |
 | `src/bulkQueue.js`, `src/zip.js` | Bulk mode's queue, which converts files in turn and redoes only those a change affects, and the zip it downloads as. |

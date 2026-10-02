@@ -73,7 +73,9 @@ function IconButton({label, onClick, children}) {
 function DistanceControl({result, screenLog2, onChange, mip, magnify, onMagnify}) {
     const screenPixels = Math.round(2 ** screenLog2);
     const level = (n) => `mip ${n} (${Math.max(1, result.width >> n)}×${Math.max(1, result.height >> n)})`;
-    const showing = (n) => n >= result.swapLevel ? "distant image" : "close-up image";
+    // Only a spray made here knows where its distant image starts.
+    const knownSwap = result.swapLevel !== null && result.swapLevel !== undefined;
+    const showing = (n) => !knownSwap ? null : n >= result.swapLevel ? "distant image" : "close-up image";
     const swapPixels = result.swapDimension;
     // Where the swap sits along the track, which runs from close on the left to far.
     const swapAt = (nearestLog2 - Math.log2(swapPixels)) / (nearestLog2 - farthestLog2) * 100;
@@ -90,7 +92,7 @@ function DistanceControl({result, screenLog2, onChange, mip, magnify, onMagnify}
                            aria-label="Distance: how small the spray is on screen"/>
                     <div className="relative h-4 text-xs opacity-60">
                         <span className="absolute left-0">close</span>
-                        <span className="absolute -translate-x-1/2 whitespace-nowrap" style={{left: `${swapAt}%`}}>▲ swap at {swapPixels} px</span>
+                        {knownSwap && <span className="absolute -translate-x-1/2 whitespace-nowrap" style={{left: `${swapAt}%`}}>▲ swap at {swapPixels} px</span>}
                         <span className="absolute right-0">far</span>
                     </div>
                 </div>
@@ -108,7 +110,8 @@ function DistanceControl({result, screenLog2, onChange, mip, magnify, onMagnify}
                 </div>
             </div>
             <div className="tabular-nums">
-                Seen at <strong>{screenPixels} px</strong>: the GPU draws {level(mip.lower)}, the <strong>{showing(mip.lower)}</strong>
+                Seen at <strong>{screenPixels} px</strong>: the GPU draws {level(mip.lower)}
+                {showing(mip.lower) && <>, the <strong>{showing(mip.lower)}</strong></>}
                 {mip.blend > 0.05 && mip.upper !== mip.lower && (
                     <>, blending {Math.round(mip.blend * 100)}% of {level(mip.upper)}{showing(mip.upper) !== showing(mip.lower) && ` (${showing(mip.upper)})`}</>
                 )}

@@ -1,5 +1,5 @@
 import {useEffect, useRef, useState, useSyncExternalStore} from "react";
-import {acceptedNames, acceptedTypes} from "../formats.js";
+import {acceptAttribute, acceptedNames, acceptedTypes, withKnownType} from "../formats.js";
 import {candidateChoices} from "../plan.js";
 import {downloadBlob} from "../useConversion.js";
 import {buildVMT} from "../vtf.js";
@@ -128,7 +128,8 @@ export default function Bulk({queue}) {
     const done = items.filter(item => item.status === "done");
     const counts = ["converting", "waiting", "probing", "error"].map(status => [status, items.filter(i => i.status === status).length]);
 
-    const addFiles = (files) => {
+    const addFiles = (dropped) => {
+        const files = dropped.map(withKnownType);
         const images = files.filter(file => acceptedTypes.includes(file.type));
         const skipped = files.length - images.length;
         setNotice(skipped ? `Skipped ${skipped} file${skipped === 1 ? "" : "s"} that ${skipped === 1 ? "isn't a" : "aren't"} ${acceptedNames} file${skipped === 1 ? "" : "s"}` : null);
@@ -150,7 +151,7 @@ export default function Bulk({queue}) {
     };
 
     const input = (ref, extra) => (
-        <input ref={ref} type="file" multiple className="hidden" accept={acceptedTypes.join(",")} {...extra}
+        <input ref={ref} type="file" multiple className="hidden" accept={acceptAttribute} {...extra}
                onChange={(event) => {
                    addFiles([...event.target.files]);
                    event.target.value = null;

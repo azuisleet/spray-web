@@ -1,6 +1,6 @@
 import {useEffect, useRef} from "react";
 import {nudgeCrop} from "../cropFocus.js";
-import {acceptedTypes} from "../formats.js";
+import {acceptAttribute} from "../formats.js";
 import {fitCrop, fitPad, fitStretch} from "../plan.js";
 
 const fitOptions = [
@@ -27,7 +27,7 @@ export function DropZone({label, hint, file, onSelect, compact = false}) {
              }}>
             <div className="font-semibold">{label}</div>
             <div className="max-w-full truncate text-sm opacity-70">{file ? file.name : hint}</div>
-            <input ref={inputRef} type="file" className="hidden" accept={acceptedTypes.join(",")}
+            <input ref={inputRef} type="file" className="hidden" accept={acceptAttribute}
                    onClick={(event) => event.stopPropagation()}
                    onChange={(event) => {
                        const selected = event.target.files?.[0];

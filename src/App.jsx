@@ -2,11 +2,12 @@ import {useDeferredValue, useEffect, useEffectEvent, useMemo, useState, useSyncE
 import {BulkQueue} from "./bulkQueue.js";
 import Bulk from "./components/Bulk.jsx";
 import {ChoicePicker, OutputPanel} from "./components/Output.jsx";
+import {VtfViewer} from "./components/VtfView.jsx";
 import Preview from "./components/Preview.jsx";
 import {DropZone, FitControl, SourceThumbnail, TrimControl} from "./components/Source.jsx";
 import {defaultTrim, videoDurations} from "./decode.js";
 import {Label, Panel, ProgressBar, Spinner} from "./components/ui.jsx";
-import {acceptedNames, acceptedTypes, namePasted} from "./formats.js";
+import {acceptedNames, acceptedTypes, isVtf, namePasted, withKnownType} from "./formats.js";
 import {convertImage, probeImage} from "./convert.js";
 import {candidateChoices, fitCrop, fitPad, fitStretch, listCandidates} from "./plan.js";
 import {readSetting, useSetting, writeSetting} from "./settings.js";
@@ -56,6 +57,8 @@ function App() {
     // Settings are remembered between visits; files and crop positions are not.
     const [mode, setMode] = useSetting("mode", modes.map(([value]) => value), modeSingle);
     const [file, setFile] = useState(null);
+    // A spray file being looked at rather than converted (single image tab only).
+    const [viewFile, setViewFile] = useState(null);
     const [farFile, setFarFile] = useState(null);
     const [swapPixels, setSwapPixels] = useSetting("swapPixels", swapOptions.map(option => option.pixels), 64);
     const [choiceKey, setChoiceKey] = useSetting("choice", choiceKeys, "balanced");
@@ -81,9 +84,11 @@ function App() {
     }));
 
     const mipTrick = mode === modeMipTrick;
+    const layoutClass = "mx-auto grid w-full max-w-7xl grow items-start gap-6 p-6 md:grid-cols-[minmax(14rem,18rem)_minmax(0,1fr)] lg:grid-cols-[minmax(14rem,18rem)_minmax(0,1fr)_minmax(14rem,18rem)]";
 
     // Rejects unsupported files here, where the reason can still be shown.
-    const accept = (onAccepted) => (selected) => {
+    const accept = (onAccepted) => (dropped) => {
+        const selected = withKnownType(dropped);
         if (!acceptedTypes.includes(selected.type)) {
             setNotice(`${selected.name} isn't a ${acceptedNames} file`);
             return;
@@ -91,11 +96,22 @@ function App() {
         setNotice(null);
         onAccepted(selected);
     };
-    const selectFile = accept((selected) => {
+    const convertFrom = (selected) => {
+        setViewFile(null);
         setFile(selected);
         setFocus(centred);
         setSoftEdgesChoice(null);
         setTrimChoice(null);
+    };
+    // A spray dropped on the single image tab is shown as it is; anywhere else, and once
+    // asked to, it is just another source to convert.
+    const selectFile = accept((selected) => {
+        if (isVtf(selected) && mode === modeSingle) {
+            setViewFile(selected);
+            setFile(null);
+        } else {
+            convertFrom(selected);
+        }
     });
     const selectFarFile = accept((selected) => {
         setFarFile(selected);
@@ -204,10 +220,12 @@ function App() {
                 </div>
             </header>
 
-            {mode === modeBulk ? <Bulk queue={bulkQueue}/> : (
-                <main className="mx-auto grid w-full max-w-7xl grow items-start gap-6 p-6 md:grid-cols-[minmax(14rem,18rem)_minmax(0,1fr)] lg:grid-cols-[minmax(14rem,18rem)_minmax(0,1fr)_minmax(14rem,18rem)]">
+            {mode === modeBulk ? <Bulk queue={bulkQueue}/> : mode === modeSingle && viewFile ? (
+                <VtfViewer file={viewFile} onSelect={selectFile} onConvert={() => convertFrom(viewFile)} layoutClass={layoutClass}/>
+            ) : (
+                <main className={layoutClass}>
                     <Panel title="Source">
-                        <DropZone label={mipTrick ? "Close up" : "Image or video"} hint="drop, choose or paste one"
+                        <DropZone label={mipTrick ? "Close up" : "Image, video or spray"} hint="drop, choose or paste one"
                                   file={file} onSelect={selectFile} compact={!!info}/>
                         {info && <SourceThumbnail info={info} fit={fit} focus={focus} onFocus={setFocus} pixelated={pixelArt}/>}
                         {video && <TrimControl duration={video.duration} trim={trim} onTrim={setTrimChoice}/>}

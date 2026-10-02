@@ -16,6 +16,8 @@ function swapRedBlue(source) {
 }
 
 export const codecs = {
+    // Levels that are already RGBA, as when viewing a VTF read from a file.
+    decoded: {encode: (width, height, rgba) => rgba, decode: (width, height, rgba) => rgba},
     [formatDXT1]: {encode: encodeDXT1, decode: decodeDXT1},
     [formatDXT5]: {encode: encodeDXT5, decode: decodeDXT5},
     [formatBGRA8888]: {encode: (width, height, rgba) => swapRedBlue(rgba), decode: (width, height, data) => swapRedBlue(data)},

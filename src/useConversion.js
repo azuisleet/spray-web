@@ -1,5 +1,6 @@
 import {useEffect, useState} from "react";
 import {convertImage, probeImage} from "./convert.js";
+import {readVTF} from "./vtfRead.js";
 
 // Long enough to coalesce a burst of setting changes, short enough to feel immediate.
 const debounceMs = 150;
@@ -91,4 +92,22 @@ export function useProbe(file) {
     if (!file) return {status: "idle", info: null, error: null};
     if (state.file !== file) return {status: "probing", info: null, error: null};
     return state.error ? {status: "error", info: null, error: state.error} : {status: "done", info: state.info, error: null};
+}
+
+/** Reads a VTF file for viewing; null while it is being read. */
+export function useVtf(file) {
+    const [state, setState] = useState({file: null, vtf: null});
+
+    useEffect(() => {
+        if (!file) return;
+        let cancelled = false;
+        file.arrayBuffer().then(buffer => {
+            if (!cancelled) setState({file, vtf: readVTF(buffer)});
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, [file]);
+
+    return state.file === file ? state.vtf : null;
 }

@@ -1,3 +1,4 @@
+import {hasSoftAlpha} from "./alpha.js";
 import {openImage} from "./decode.js";
 import {getEncoderPool} from "./encoderPool.js";
 import {
@@ -13,18 +14,6 @@ const minBlockDimension = 4;
 
 // Share of the progress bar given to opening the image, before any strip is finished.
 const openedShare = 0.1;
-
-// Share of pixels that must be partly transparent before an image counts as having soft
-// edges: enough to rule out the odd stray pixel of a hard edged image.
-const softAlphaShare = 0.002;
-
-function hasSoftAlpha(pixels) {
-    let partial = 0;
-    for (let i = 3; i < pixels.length; i += 4) {
-        if (pixels[i] > 0 && pixels[i] < 255) partial++;
-    }
-    return partial > (pixels.length / 4) * softAlphaShare;
-}
 
 // Longest side of the thumbnail probeImage returns, unless asked for another.
 const defaultThumbnailSize = 512;

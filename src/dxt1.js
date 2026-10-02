@@ -39,6 +39,10 @@ const bestIndices = new Uint8Array(16);
 
 const best = {error: Infinity, c0: 0, c1: 0};
 
+// Set while encoding the colour half of a DXT5 block, which is always read as four colours
+// (alpha lives in its own half), so the three colour palette must never be chosen.
+let fourColourOnly = false;
+
 function expand5(v) {
     return (v << 3) | (v >> 2);
 }
@@ -85,11 +89,12 @@ function fillPalette(c0, c1, threeColour) {
  * is harmless since every visible entry is the same colour.
  */
 function tryPair(c0, c1, threeColour) {
+    if (fourColourOnly) threeColour = false;
     if (threeColour) {
         if (c0 > c1) { const t = c0; c0 = c1; c1 = t; }
     } else if (c0 < c1) {
         const t = c0; c0 = c1; c1 = t;
-    } else if (c0 === c1) {
+    } else if (c0 === c1 && !fourColourOnly) {
         threeColour = true;
     }
 
@@ -267,7 +272,7 @@ function compressBlock(out, offset) {
         const direct = quantise565(r, g, b);
         tryPair(direct, direct, true);
         trySingleColour(r, g, b, true);
-        if (!hasTransparent) trySingleColour(r, g, b, false);
+        if (!hasTransparent || fourColourOnly) trySingleColour(r, g, b, false);
     } else {
         // Principal axis by power iteration, seeded with the covariance row of the widest
         // channel: it is never zero here, where a fixed seed like (1,1,1) can be
@@ -298,7 +303,7 @@ function compressBlock(out, offset) {
         const high = quantise565(meanR + ax * maxT, meanG + ay * maxT, meanB + az * maxT);
         const low = quantise565(meanR + ax * minT, meanG + ay * minT, meanB + az * minT);
 
-        const modes = hasTransparent ? [true] : [false, true];
+        const modes = fourColourOnly ? [false] : hasTransparent ? [true] : [false, true];
         for (const threeColour of modes) {
             const before = best.error;
             tryPair(high, low, threeColour);
@@ -311,7 +316,7 @@ function compressBlock(out, offset) {
         }
     }
 
-    refine(best.c0 <= best.c1);
+    refine(!fourColourOnly && best.c0 <= best.c1);
 
     let bits = 0;
     for (let i = 15; i >= 0; i--) bits = (bits << 2) | bestIndices[i];
@@ -358,6 +363,28 @@ export function encodeDXT1(width, height, rgba) {
     }
 
     return out;
+}
+
+/**
+ * Encodes the colour half of a DXT5 block: the 4x4 block whose top left pixel is at index
+ * p of rgba (a row of stride bytes), into out at offset. Pixels with no alpha at all are
+ * left out of the fit, since nothing of their colour shows.
+ */
+export function encodeColourBlock(rgba, stride, p, out, offset) {
+    for (let y = 0, i = 0; y < 4; y++, p += stride - 16) {
+        for (let x = 0; x < 4; x++, i++, p += 4) {
+            blockR[i] = rgba[p];
+            blockG[i] = rgba[p + 1];
+            blockB[i] = rgba[p + 2];
+            blockOpaque[i] = rgba[p + 3] > 0 ? 1 : 0;
+        }
+    }
+    fourColourOnly = true;
+    try {
+        compressBlock(out, offset);
+    } finally {
+        fourColourOnly = false;
+    }
 }
 
 /** Decodes as the hardware does, for previews and tests. */

@@ -152,3 +152,28 @@ describe("BulkQueue", () => {
         expect(queue.getSnapshot()).not.toBe(first);
     });
 });
+
+describe("BulkQueue soft edges and pixel art", () => {
+    it("keeps soft edges only for files that have them, and redoes them when the setting changes", async () => {
+        const calls = [];
+        const convert = (file, options) => new Promise(resolve => {
+            calls.push({file, options});
+            resolve({});
+        });
+        const probe = async (file) => ({width: 100, height: 100, frameCount: 1, durations: [0], softAlpha: file.name === "soft"});
+        const queue = new BulkQueue({convert, probe});
+        queue.add([{name: "soft"}, {name: "hard"}]);
+        await settle(); await settle();
+        expect(calls.map(c => `${c.file.name}:${c.options.softEdges}`)).toEqual(["soft:true", "hard:false"]);
+
+        // Turning it off changes only the file it applied to.
+        queue.setSettings({softEdges: false});
+        await settle(); await settle();
+        expect(calls.slice(2).map(c => `${c.file.name}:${c.options.softEdges}`)).toEqual(["soft:false"]);
+
+        queue.setSettings({pixelArt: true});
+        await settle(); await settle();
+        expect(calls.slice(3).every(c => c.options.pixelArt)).toBe(true);
+        expect(calls.length).toBe(5);
+    });
+});

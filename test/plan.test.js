@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {
     chooseFrameIndices, chooseSwapLevel, chooseTarget, engineFrameRate, fitCrop, fitGeometry, fitPad, fitStretch,
-    listCandidates, mipAt, placeInTexture, preferBalanced, preferDetail, preferMotion, targetFrameCount,
+    listCandidates, mipAt, placeInTexture, placeTarget, preferBalanced, preferDetail, preferMotion, targetFrameCount,
 } from "../src/plan.js";
 import {dxt1Size, headerSize, maximumSize, mipDimensions} from "../src/vtf.js";
 
@@ -179,5 +179,57 @@ describe("mipAt", () => {
     it("stays within the chain", () => {
         expect(mipAt(256, 256, 9, 1024)).toMatchObject({lower: 0, blend: 0});
         expect(mipAt(256, 256, 9, 0.25)).toMatchObject({lower: 8, upper: 8});
+    });
+});
+
+describe("chooseTarget with soft edges and pixel art", () => {
+    it("spends twice the bytes per texel on soft edges", () => {
+        const target = chooseTarget(4000, 4000, 1, {softEdges: true});
+        expect(target.format).toBe("dxt5");
+        expect(target.cost).toBeLessThanOrEqual(maximumSize);
+        // One byte per texel: the budget's worth of texels, half what DXT1 gets.
+        expect(target.targetWidth * target.targetHeight).toBeLessThanOrEqual(maximumSize);
+        expect(target.targetWidth * target.targetHeight).toBeGreaterThan(maximumSize * 0.99);
+    });
+
+    it("keeps small pixel art at its own size, uncompressed", () => {
+        const target = chooseTarget(64, 64, 1, {pixelArt: true});
+        expect(size(target)).toBe("64x64x1");
+        expect(target.format).toBe("bgra8888");
+        expect(target.pixel).toEqual({scale: 1, width: 64, height: 64});
+    });
+
+    it("pads pixel art to a square on whole texels, centred", () => {
+        const target = chooseTarget(48, 32, 1, {pixelArt: true});
+        expect(size(target)).toBe("48x48x1");
+        const placement = placeTarget(fitGeometry(48, 32, fitPad), target, 48, 48);
+        expect(placement).toEqual({src: {x0: 0, y0: 0, x1: 48, y1: 32}, dst: {x0: 0, y0: 8, x1: 48, y1: 40}});
+    });
+
+    it("rounds odd sizes up to whole blocks without stretching the pixels", () => {
+        const target = chooseTarget(50, 30, 1, {pixelArt: true});
+        expect(size(target)).toBe("52x52x1");
+        expect(target.pixel).toEqual({scale: 1, width: 50, height: 30});
+    });
+
+    it("compresses pixel art when exact colour would cost frames", () => {
+        // Uncompressed, 200x200 fits 3 frames; compressed, all 13.
+        const target = chooseTarget(200, 200, 13, {pixelArt: true});
+        expect(target.format).toBe("dxt1");
+        expect(target.frames).toBe(13);
+        expect(target.pixel.scale).toBe(1);
+    });
+
+    it("shrinks large pixel art by a whole factor only", () => {
+        const target = chooseTarget(2000, 2000, 1, {pixelArt: true});
+        expect(target.pixel.scale).toBe(2);
+        expect(target.pixel.width).toBe(1000);
+        expect(target.format).toBe("dxt1");
+    });
+
+    it("leaves pixel art out of mip tricks", () => {
+        const target = chooseTarget(64, 64, 1, {pixelArt: true, useMips: true});
+        expect(target.pixel).toBeNull();
+        expect(target.format).toBe("dxt1");
     });
 });

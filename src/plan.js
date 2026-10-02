@@ -3,7 +3,8 @@
  * count to use, and which source frames fill the slots. Pure functions with no browser
  * dependencies, so the UI can call them freely and tests run them under Node.
  */
-import {dxt1Size, maximumSize, mipDimensions} from "./vtf.js";
+import {formatBGRA8888, formatDXT1, formatDXT5, textureFormats} from "./textureFormats.js";
+import {maximumSize, mipDimensions} from "./vtf.js";
 
 export const preferDetail = "detail";
 export const preferBalanced = "balanced";
@@ -21,9 +22,10 @@ const axisSizes = [4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048];
 
 // The engine itself takes any multiple of 4: still and animated test sprays at sizes like
 // 1008x1040, 720x724 and 360x360 (see scripts/test-sprays.mjs) all drew in full in TF2
-// with no resampling. Not with mips, though: 600x600 and 720x724 test sprays with full mip
-// chains drew with the levels out of alignment, while the 512x512 control was fine, so mip
-// tricks stay at powers of two.
+// with no resampling, and so did 2048x256 and 256x2048, stretched to the square decal.
+// Not with mips, though: 600x600 and 720x724 test sprays with full mip chains drew with
+// the levels out of alignment, while the 512x512 control was fine, so mip tricks stay at
+// powers of two.
 const blockSizes = Array.from({length: 2048 / 4}, (_, i) => (i + 1) * 4);
 
 // Exponents in chooseTarget's score. At 3 the presets differ clearly without either one
@@ -43,9 +45,47 @@ const minimumAnimatedFrames = 2;
 // plays no part.
 export const engineFrameRate = 5;
 
-function payloadPerFrame(width, height, useMips) {
-    if (!useMips) return dxt1Size(width, height);
-    return mipDimensions(width, height).reduce((total, [w, h]) => total + dxt1Size(w, h), 0);
+// Pixel art never shrinks further than this; past it the art is gone anyway.
+const largestPixelReduction = 64;
+
+// With detail and motion equal, the more exact format is kept (uncompressed over block
+// compressed) before the cheaper one.
+const formatExactness = {[formatBGRA8888]: 0, [formatDXT5]: 1, [formatDXT1]: 2};
+
+const roundUpToBlock = (n) => Math.max(4, Math.ceil(n / 4) * 4);
+
+function payloadPerFrame(width, height, useMips, format) {
+    const {size} = textureFormats[format];
+    if (!useMips) return size(width, height);
+    return mipDimensions(width, height).reduce((total, [w, h]) => total + size(w, h), 0);
+}
+
+// Every size on the grid, in the one format asked for. covered is how many texels the
+// image spans on each axis.
+function* gridCandidates(sizes, format, coverX, coverY) {
+    for (const targetWidth of sizes) {
+        for (const targetHeight of sizes) {
+            yield {targetWidth, targetHeight, format, coveredX: targetWidth * coverX, coveredY: targetHeight * coverY, pixel: null};
+        }
+    }
+}
+
+/**
+ * Pixel art: one texel per scale x scale block of source pixels, for whole scales only, so
+ * no pixel is ever blended with its neighbours. The texture is the image padded out to
+ * whole blocks, square on the wall unless stretched, in an exact format and a compressed one.
+ */
+function* pixelCandidates(sourceWidth, sourceHeight, fit, formats) {
+    for (let scale = 1; scale <= largestPixelReduction; scale++) {
+        const width = Math.ceil(sourceWidth / scale);
+        const height = Math.ceil(sourceHeight / scale);
+        const side = roundUpToBlock(Math.max(width, height));
+        const [targetWidth, targetHeight] = fit === fitStretch ? [roundUpToBlock(width), roundUpToBlock(height)] : [side, side];
+        for (const format of formats) {
+            yield {targetWidth, targetHeight, format, coveredX: width, coveredY: height, pixel: {scale, width, height}};
+        }
+        if (width <= 4 && height <= 4) return;
+    }
 }
 
 /**
@@ -108,6 +148,22 @@ export function targetFrameCount(durations, {keepAllFrames = false} = {}) {
 }
 
 /**
+ * Where the image goes in a texture for a planned target. Pixel art sits at its exact size
+ * on whole texels, centred; anything else follows its place in the square decal.
+ */
+export function placeTarget(geometry, target, width, height) {
+    if (!target.pixel) return placeInTexture(geometry, width, height);
+    const {scale, width: imageWidth, height: imageHeight} = target.pixel;
+    const {x0, y0} = geometry.source;
+    const left = Math.floor((width - imageWidth) / 2);
+    const top = Math.floor((height - imageHeight) / 2);
+    return {
+        src: {x0, y0, x1: x0 + imageWidth * scale, y1: y0 + imageHeight * scale},
+        dst: {x0: left, y0: top, x1: left + imageWidth, y1: top + imageHeight},
+    };
+}
+
+/**
  * Picks the texture size and frame count together. Enumerating the candidates beats
  * deriving one answer because the good choice depends on how the two trade off, and
  * the space is small enough to search in a few milliseconds.
@@ -119,63 +175,80 @@ export function targetFrameCount(durations, {keepAllFrames = false} = {}) {
  *
  * @param wantedFrames from targetFrameCount; never exceeded, and motion is measured
  *        against it
- * @returns {targetWidth, targetHeight, frames, detail, motion, waste, cost, ...} or null
- *          when nothing fits
+ * @param options
+ *   softEdges  keep 8-bit alpha: DXT5 rather than DXT1
+ *   pixelArt   whole pixels only, in BGRA8888 when that costs nothing, never with mips
+ * @returns {targetWidth, targetHeight, frames, format, pixel, detail, motion, waste, cost,
+ *          ...} or null when nothing fits; pixel is {scale, width, height} for pixel art
  */
-export function chooseTarget(width, height, wantedFrames, {useMips = false, preference = preferBalanced, fit = fitPad} = {}) {
+export function chooseTarget(width, height, wantedFrames, {
+    useMips = false, preference = preferBalanced, fit = fitPad, softEdges = false, pixelArt = false,
+} = {}) {
     const weights = preferenceWeights[preference] || preferenceWeights[preferBalanced];
     const {source, decal} = fitGeometry(width, height, fit);
     const sourceWidth = source.x1 - source.x0;
     const sourceHeight = source.y1 - source.y0;
     const coverX = decal.x1 - decal.x0;
     const coverY = decal.y1 - decal.y0;
-    const sizes = useMips ? axisSizes : blockSizes;
+    const compressed = softEdges ? formatDXT5 : formatDXT1;
+    const candidates = pixelArt && !useMips
+        ? pixelCandidates(sourceWidth, sourceHeight, fit, [formatBGRA8888, compressed])
+        : gridCandidates(useMips ? axisSizes : blockSizes, compressed, coverX, coverY);
     let best = null;
 
-    for (const targetWidth of sizes) {
-        for (const targetHeight of sizes) {
-            const perFrame = payloadPerFrame(targetWidth, targetHeight, useMips);
-            const affordable = Math.floor(maximumSize / perFrame);
-            if (affordable < 1) continue;
+    for (const {targetWidth, targetHeight, format, coveredX, coveredY, pixel} of candidates) {
+        const perFrame = payloadPerFrame(targetWidth, targetHeight, useMips, format);
+        const affordable = Math.floor(maximumSize / perFrame);
+        if (affordable < 1) continue;
 
-            const frames = Math.min(wantedFrames, affordable);
-            if (frames < Math.min(wantedFrames, minimumAnimatedFrames)) continue;
+        const frames = Math.min(wantedFrames, affordable);
+        if (frames < Math.min(wantedFrames, minimumAnimatedFrames)) continue;
 
-            // Texels the image covers on each axis against the source pixels there, capped at
-            // 1 because upscaling adds nothing. Their product is the fraction of source pixels kept.
-            const samplingX = targetWidth * coverX / sourceWidth;
-            const samplingY = targetHeight * coverY / sourceHeight;
-            const detailX = Math.min(1, samplingX);
-            const detailY = Math.min(1, samplingY);
-            const detail = detailX * detailY;
-            // The blurrier axis is what you see, so a lopsided texture only helps once the
-            // other axis already holds the source at full resolution.
-            const resolution = Math.min(detailX, detailY);
-            const motion = frames / wantedFrames;
-            const resolutionTerm = resolution ** weights.detail;
-            const motionTerm = motion ** weights.motion;
-            const score = Math.min(resolutionTerm, motionTerm);
-            // Then whichever pick keeps more overall, then the one sampling the source most evenly
-            // across the two axes (blur that is the same both ways looks better, and sampling
-            // one axis past the source's resolution only spends bytes), then fewer bytes.
-            const total = detail * motionTerm;
-            const anisotropy = Math.abs(Math.log2(samplingX / samplingY));
-            const cost = perFrame * frames;
+        // Texels the image covers on each axis against the source pixels there, capped at
+        // 1 because upscaling adds nothing. Their product is the fraction of source pixels kept.
+        const samplingX = coveredX / sourceWidth;
+        const samplingY = coveredY / sourceHeight;
+        const detailX = Math.min(1, samplingX);
+        const detailY = Math.min(1, samplingY);
+        const detail = detailX * detailY;
+        // The blurrier axis is what you see, so a lopsided texture only helps once the
+        // other axis already holds the source at full resolution.
+        const resolution = Math.min(detailX, detailY);
+        const motion = frames / wantedFrames;
+        const resolutionTerm = resolution ** weights.detail;
+        const motionTerm = motion ** weights.motion;
+        const score = Math.min(resolutionTerm, motionTerm);
+        // Then whichever pick keeps more overall, then the one sampling the source most evenly
+        // across the two axes (blur that is the same both ways looks better, and sampling
+        // one axis past the source's resolution only spends bytes), then fewer bytes.
+        const total = detail * motionTerm;
+        const anisotropy = Math.abs(Math.log2(samplingX / samplingY));
+        const cost = perFrame * frames;
 
-            const better = !best
-                || score > best.score + 1e-9
-                || (score > best.score - 1e-9
-                    && (total > best.total + 1e-9
-                        || (total > best.total - 1e-9
-                            && (anisotropy < best.anisotropy
-                                || (anisotropy === best.anisotropy && cost < best.cost)))));
+        const exactness = formatExactness[format];
 
-            if (better) best = {targetWidth, targetHeight, frames, score, detail, motion, total, anisotropy, cost};
+        const better = !best
+            || score > best.score + 1e-9
+            || (score > best.score - 1e-9
+                && (total > best.total + 1e-9
+                    || (total > best.total - 1e-9
+                        && (exactness < best.exactness
+                            || (exactness === best.exactness
+                                && (anisotropy < best.anisotropy
+                                    || (anisotropy === best.anisotropy && cost < best.cost)))))));
+
+        if (better) {
+            best = {targetWidth, targetHeight, frames, format, pixel, score, detail, motion, total, exactness, anisotropy, cost};
         }
     }
 
-    // Padding lives in the square, so it is the same whatever texture is chosen.
-    if (best) best.waste = 1 - coverX * coverY;
+    if (best) {
+        // Normal padding lives in the square, so it is the same whatever texture is chosen;
+        // pixel art also pads out to whole blocks.
+        best.waste = best.pixel
+            ? 1 - (best.pixel.width * best.pixel.height) / (best.targetWidth * best.targetHeight)
+            : 1 - coverX * coverY;
+    }
     return best;
 }
 
@@ -229,7 +302,7 @@ export const candidateChoices = [
  *          plays in game, and speed (original length over in-game length: above 1 plays
  *          fast, below 1 slow). A still only gets the balanced choice.
  */
-export function listCandidates(width, height, durations, {useMips = false, fit = fitPad} = {}) {
+export function listCandidates(width, height, durations, {useMips = false, fit = fitPad, softEdges = false, pixelArt = false} = {}) {
     const animated = durations.length > 1;
     const sourceSeconds = durations.reduce((sum, d) => sum + d, 0) / 1000;
 
@@ -237,7 +310,7 @@ export function listCandidates(width, height, durations, {useMips = false, fit =
         .filter(choice => animated || choice.key === "balanced")
         .map(choice => {
             const wanted = targetFrameCount(durations, {keepAllFrames: choice.keepAllFrames});
-            const target = chooseTarget(width, height, wanted, {useMips, preference: choice.preference, fit});
+            const target = chooseTarget(width, height, wanted, {useMips, preference: choice.preference, fit, softEdges, pixelArt});
             const playSeconds = target ? target.frames / engineFrameRate : 0;
             return {...choice, target, playSeconds, speed: animated && playSeconds ? sourceSeconds / playSeconds : 1};
         });

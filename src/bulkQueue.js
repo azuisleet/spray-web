@@ -1,3 +1,4 @@
+import {defaultTrim, videoDurations} from "./decode.js";
 import {candidateChoices, fitPad, listCandidates} from "./plan.js";
 
 let nextId = 1;
@@ -19,14 +20,19 @@ export class BulkQueue {
     #probe;
     #listeners = new Set();
     #items = [];
-    #settings = {choiceKey: "balanced", fit: fitPad};
+    // softEdges keeps soft edges for the files that have them; pixelArt applies to all.
+    #settings = {choiceKey: "balanced", fit: fitPad, softEdges: true, pixelArt: false};
     #running = null;    // {id, key, controller}
     #snapshot = null;
 
-    /** @param convert convertImage; probe probeImage. Injected so tests can fake them. */
-    constructor({convert, probe}) {
+    /**
+     * @param convert convertImage; probe probeImage. Injected so tests can fake them.
+     * @param settings optional starting settings, such as remembered ones
+     */
+    constructor({convert, probe, settings = {}}) {
         this.#convert = convert;
         this.#probe = probe;
+        this.#settings = {...this.#settings, ...settings};
     }
 
     subscribe = (listener) => {
@@ -62,25 +68,36 @@ export class BulkQueue {
         const choiceKey = item.overrides.choiceKey ?? this.#settings.choiceKey;
         const fit = item.overrides.fit ?? this.#settings.fit;
         const choice = candidateChoices.find(c => c.key === choiceKey);
-        const options = {preference: choice.preference, keepAllFrames: choice.keepAllFrames, fit};
-        if (!item.info) return {key: null, options, fit};
+        const softEdges = this.#settings.softEdges && !!item.info?.softAlpha;
+        const pixelArt = this.#settings.pixelArt;
+        const shape = {fit, softEdges, pixelArt};
+        // A video uses its opening span, and never every frame (30 a second played at 5).
+        const video = item.info?.video;
+        const trim = video ? defaultTrim(video.duration) : undefined;
+        const keepAllFrames = choice.keepAllFrames && !video;
+        const options = {preference: choice.preference, keepAllFrames, trim, ...shape};
+        if (!item.info) return {key: null, options, shape, durations: null};
 
         const {info} = item;
+        const durations = video ? videoDurations(trim.end - trim.start) : info.durations;
         // A still has a single candidate, whatever the choice.
-        const candidates = listCandidates(info.width, info.height, info.durations, {fit});
+        const candidates = listCandidates(info.width, info.height, durations, shape).filter(c => !(video && c.keepAllFrames));
         const candidate = candidates.find(c => c.key === choiceKey) ?? candidates[0];
         const target = candidate?.target;
         const animated = info.frameCount > 1;
         // Keeping every frame picks frames one for one rather than by time, so it can differ
         // even at the same frame count.
-        const key = [fit, target ? `${target.targetWidth}x${target.targetHeight}x${target.frames}` : "none", animated && choice.keepAllFrames].join("|");
-        return {key, options, fit};
+        const output = target ? `${target.targetWidth}x${target.targetHeight}x${target.frames}|${target.format}|${target.pixel?.scale ?? 0}` : "none";
+        const key = [fit, output, animated && keepAllFrames].join("|");
+        return {key, options, shape, durations};
     }
 
     #withCandidates(item) {
         if (!item.info) return item;
         const {info} = item;
-        return {...item, candidates: listCandidates(info.width, info.height, info.durations, {fit: this.#plan(item).fit})};
+        const {shape, durations} = this.#plan(item);
+        const candidates = listCandidates(info.width, info.height, durations, shape).filter(c => !(info.video && c.keepAllFrames));
+        return {...item, candidates};
     }
 
     add(files) {

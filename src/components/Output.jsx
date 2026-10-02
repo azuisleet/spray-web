@@ -1,7 +1,15 @@
+import {formatBGRA8888, formatDXT5, textureFormats} from "../textureFormats.js";
 import {buildVMT} from "../vtf.js";
 import {downloadBlob} from "../useConversion.js";
 
 const uploadLimit = 512 * 1024;
+
+function formatDescription(format) {
+    const {label} = textureFormats[format];
+    if (format === formatDXT5) return `${label}, soft edges`;
+    if (format === formatBGRA8888) return `${label}, exact colour`;
+    return label;
+}
 
 function speedText(speed) {
     if (Math.abs(speed - 1) < 0.05) return "real speed";
@@ -54,7 +62,10 @@ export function OutputPanel({result, baseName}) {
     const used = result.bytes / uploadLimit;
     const facts = [
         ["Texture", `${result.width}×${result.height}`],
-        result.sourceFrames > 1 && ["Frames", `${result.frames} from ${result.sourceFrames}`],
+        ["Format", formatDescription(result.format)],
+        result.pointSample && ["Pixels", result.pixelScale > 1 ? `point sampled, 1 texel per ${result.pixelScale}×${result.pixelScale} pixels` : "point sampled, one texel each"],
+        // A video's own count is only the grid it was sampled on, so it is left out.
+        result.sourceFrames > 1 && ["Frames", result.video ? `${result.frames}` : `${result.frames} from ${result.sourceFrames}`],
         result.sourceFrames > 1 && ["Plays in", `${result.playSeconds.toFixed(1)} s (original ${result.sourceSeconds.toFixed(1)} s)`],
         result.padding > 0.005 && ["Padding", `${Math.round(result.padding * 100)}%`],
         result.swapLevel !== null && ["Distant image", `mip ${result.swapLevel} (${result.swapDimension} px) down`],

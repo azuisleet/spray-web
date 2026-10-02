@@ -12,6 +12,10 @@
  * padding their DXT1 blocks carry, which should never show. Their preview has the levels
  * side by side.
  *
+ * Format and filtering tests come in pairs that differ in one thing, and show the number
+ * that differs: the image format (15 DXT5, 12 BGRA8888, 13 DXT1) or the point sampling
+ * flag (0x1, or 0x0 without). In TF2 all of them behaved as their notes describe.
+ *
  * Every pattern is drawn in pure colours on black, sharp-edged, so DXT1 keeps it
  * close to exact and any blur or misplacement seen in game is the engine's doing.
  */
@@ -19,9 +23,10 @@ import fs from "fs";
 import path from "path";
 import zlib from "zlib";
 import {decodeDXT1, encodeDXT1} from "../src/dxt1.js";
+import {decodeDXT5, encodeDXT5} from "../src/dxt5.js";
 import {
-    baseFlags, buildHeader, buildVMT, dxt1Size, flagEightBitAlpha, flagNoMip, flagOneBitAlpha, headerSize, maximumSize,
-    mipDimensions,
+    baseFlags, buildHeader, buildVMT, dxt1Size, flagEightBitAlpha, flagNoMip, flagOneBitAlpha, flagPointSample, headerSize,
+    imageFormatBGRA8888, imageFormatDXT1, imageFormatDXT5, maximumSize, mipDimensions,
 } from "../src/vtf.js";
 
 const uploadLimit = 512 * 1024;
@@ -47,6 +52,10 @@ const sprays = [
     {width: 720, height: 724, mips: true, note: "mips, not a power of two, uneven halving: levels misalign in TF2"},
     {width: 600, height: 600, mips: true, note: "mips, not a power of two: levels misalign in TF2"},
     {width: 512, height: 512, mips: true, note: "mips, control"},
+    // Sides past 1024, which the planner allows up to 2048: both drew in full in TF2,
+    // stretched to the square decal like any other rectangular spray.
+    {width: 2048, height: 256, note: "2048 wide: drawn in full, stretched to the square"},
+    {width: 256, height: 2048, note: "2048 tall: drawn in full, stretched to the square"},
     {width: 1024, height: 1024, note: "over the limit, expected to be refused"},
 ];
 
@@ -343,6 +352,147 @@ for (const {width, height, frames = 1, alphaFlag, mips, note} of sprays) {
     const fits = vtf.length <= uploadLimit ? "under 512 KiB" : "OVER 512 KiB";
     const budget = payload <= maximumSize ? "" : ", over the converter's budget";
     console.log(`${name}.vtf  ${vtf.length.toLocaleString().padStart(7)} bytes  ${fits}${budget}  (${note})`);
+}
+
+// ---- Format and filtering tests ----
+
+const transparentBase = (alpha, [r, g, b]) => [r, g, b, alpha];
+
+// RGBA drawing with real alpha, for the patterns that test it.
+function alphaSurface(width, height) {
+    const pixels = new Uint8Array(width * height * 4);
+    const put = (x, y, [r, g, b, a]) => {
+        if (x < 0 || y < 0 || x >= width || y >= height) return;
+        const p = (y * width + x) * 4;
+        pixels[p] = r; pixels[p + 1] = g; pixels[p + 2] = b; pixels[p + 3] = a;
+    };
+    return {pixels, put};
+}
+
+/**
+ * Soft alpha: a feathered circle, squares at 25, 50 and 75% opacity, an alpha ramp from
+ * clear to solid, and a soft shadow under the number. DXT1 can only cut each of these at
+ * half opacity; DXT5 should keep them.
+ */
+function drawSoftAlpha(size, caption) {
+    const {pixels, put} = alphaSurface(size, size);
+    const {textWidth} = surface(size, size);
+    const s = size / 512;
+
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+        const d = Math.hypot(x - 256 * s, y - 170 * s);
+        const a = Math.round(255 * Math.min(1, Math.max(0, (130 * s - d) / (50 * s))));
+        if (a > 0) put(x, y, transparentBase(a, [40, 120, 230]));
+    }
+    [64, 128, 191].forEach((alpha, n) => {
+        for (let y = 330 * s; y < 400 * s; y++) for (let x = (60 + n * 140) * s; x < (60 + n * 140 + 100) * s; x++) put(x, y, [220, 50, 40, alpha]);
+    });
+    for (let y = 430 * s; y < 480 * s; y++) for (let x = 40 * s; x < 472 * s; x++) {
+        put(x, y, [255, 255, 255, Math.round(255 * (x - 40 * s) / (432 * s))]);
+    }
+
+    // The caption over a soft shadow, drawn into its own layer and copied over.
+    const scale = Math.floor(10 * s);
+    const tx = Math.round((size - textWidth(caption, scale)) / 2), ty = Math.round(140 * s);
+    const glyphs = surface(size, size);
+    glyphs.text(caption, tx, ty, scale, white);
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+        let shadow = 0;
+        for (let dy = -6; dy <= 6; dy += 3) for (let dx = -6; dx <= 6; dx += 3) {
+            const sx = x + dx, sy = y + dy;
+            if (sx >= 0 && sy >= 0 && sx < size && sy < size && glyphs.pixels[(sy * size + sx) * 4 + 3]) shadow++;
+        }
+        const p = (y * size + x) * 4;
+        if (glyphs.pixels[p + 3]) put(x, y, [255, 255, 255, 255]);
+        else if (shadow) put(x, y, [0, 0, 0, Math.min(200, shadow * 9)]);
+    }
+    return pixels;
+}
+
+/** Pixel art at 64x64: one pixel lines, a checker border and a face, all crisp edged. */
+function drawPixelArt(caption) {
+    const size = 64;
+    const {pixels, set, rect, text, textWidth} = surface(size, size);
+    rect(0, 0, size, size, [30, 30, 40]);
+    for (let i = 0; i < size; i++) {
+        set(i, 0, i % 2 ? yellow : magenta); set(i, size - 1, i % 2 ? yellow : magenta);
+        set(0, i, i % 2 ? yellow : magenta); set(size - 1, i, i % 2 ? yellow : magenta);
+    }
+    rect(16, 12, 32, 32, [250, 200, 60]);              // face
+    rect(23, 20, 4, 6, black); rect(37, 20, 4, 6, black);
+    rect(22, 33, 20, 2, black); rect(20, 31, 2, 2, black); rect(42, 31, 2, 2, black);
+    for (let i = 0; i < 12; i++) set(4 + i, 50 + (i % 2), white);  // a one pixel zigzag
+    text(caption, Math.round((size - textWidth(caption, 1)) / 2), 52, 1, white);
+    return pixels;
+}
+
+/**
+ * Smooth gradients, where DXT1's four colours per block show as bands and uncompressed
+ * colour should not, plus a soft fade at the edge for the format's 8-bit alpha.
+ */
+function drawGradients(size, caption) {
+    const {pixels, put} = alphaSurface(size, size);
+    for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+        const u = x / (size - 1), v = y / (size - 1);
+        const r = Math.round(255 * u), g = Math.round(255 * v), b = Math.round(255 * (1 - u) * (1 - v) + 64 * u * v);
+        const edge = Math.min(x, y, size - 1 - x, size - 1 - y);
+        put(x, y, [r, g, b, Math.round(255 * Math.min(1, edge / (size * 0.12)))]);
+    }
+    const {textWidth} = surface(size, size);
+    const glyphs = surface(size, size);
+    const scale = Math.floor(size / 40);
+    glyphs.text(caption, Math.round((size - textWidth(caption, scale)) / 2), Math.round(size / 2 - 3.5 * scale), scale, white);
+    for (let i = 3; i < glyphs.pixels.length; i += 4) {
+        if (glyphs.pixels[i]) pixels.set([255, 255, 255, 255], i - 3);
+    }
+    return pixels;
+}
+
+const codecs = {
+    [imageFormatDXT1]: {encode: encodeDXT1, decode: decodeDXT1},
+    [imageFormatDXT5]: {encode: encodeDXT5, decode: decodeDXT5},
+    [imageFormatBGRA8888]: {
+        encode: (width, height, rgba) => {
+            const out = new Uint8Array(rgba.length);
+            for (let i = 0; i < rgba.length; i += 4) out.set([rgba[i + 2], rgba[i + 1], rgba[i], rgba[i + 3]], i);
+            return out;
+        },
+        decode: (width, height, data) => {
+            const out = new Uint8Array(data.length);
+            for (let i = 0; i < data.length; i += 4) out.set([data[i + 2], data[i + 1], data[i], data[i + 3]], i);
+            return out;
+        },
+    },
+};
+
+const formatSprays = [
+    {name: "spraytest_512x512_dxt5_softalpha", size: 512, format: imageFormatDXT5, flags: flagEightBitAlpha,
+        draw: () => drawSoftAlpha(512, "15"), note: "DXT5: soft edges and partial transparency should survive"},
+    {name: "spraytest_512x512_dxt1_softalpha", size: 512, format: imageFormatDXT1, flags: flagOneBitAlpha,
+        draw: () => drawSoftAlpha(512, "13"), note: "DXT1 control: the same pattern cut at half opacity"},
+    {name: "spraytest_64x64_pointsample", size: 64, format: imageFormatDXT1, flags: flagOneBitAlpha | flagPointSample,
+        draw: () => drawPixelArt("0x1"), note: "point sampling: should stay crisp and blocky up close"},
+    {name: "spraytest_64x64_filtered", size: 64, format: imageFormatDXT1, flags: flagOneBitAlpha,
+        draw: () => drawPixelArt("0x0"), note: "control: the same art, filtered as usual (blurry up close)"},
+    {name: "spraytest_256x256_bgra8888", size: 256, format: imageFormatBGRA8888, flags: flagEightBitAlpha,
+        draw: () => drawGradients(256, "12"), note: "BGRA8888: smooth gradients, soft edge fade"},
+    {name: "spraytest_256x256_dxt1_gradients", size: 256, format: imageFormatDXT1, flags: flagOneBitAlpha,
+        draw: () => drawGradients(256, "13"), note: "DXT1 control: banded gradients, hard edge"},
+];
+
+for (const {name, size, format, flags, draw, note} of formatSprays) {
+    const pixels = draw();
+    const codec = codecs[format];
+    const data = codec.encode(size, size, pixels);
+    // The base flags minus their alpha flag, plus this spray's own flags.
+    const vtfFlags = (baseFlags & ~(flagOneBitAlpha | flagEightBitAlpha)) | flagNoMip | flags;
+    const vtf = Buffer.concat([buildHeader(size, size, 1, 1, vtfFlags, format), data]);
+    fs.writeFileSync(path.join(outDir, `${name}.vtf`), vtf);
+    fs.writeFileSync(path.join(outDir, `${name}.vmt`), buildVMT(name));
+    fs.writeFileSync(path.join(outDir, `${name}.png`), encodePNG(size, size, codec.decode(size, size, data)));
+
+    const fits = vtf.length <= uploadLimit ? "under 512 KiB" : "OVER 512 KiB";
+    console.log(`${name}.vtf  ${vtf.length.toLocaleString().padStart(7)} bytes  ${fits}  flags 0x${vtfFlags.toString(16)}  (${note})`);
 }
 
 console.log(`\nWritten to ${outDir}`);

@@ -76,3 +76,24 @@ describe("resampleRows", () => {
         expect(strips).toEqual([...whole]);
     });
 });
+
+describe("resampleRows with the nearest filter", () => {
+    it("copies whole pixels at the same size and picks one per block when shrinking by a whole factor", () => {
+        const source = image(8, 8, (x, y) => [x * 30, y * 30, 100, 255]);
+        const same = render(source, 8, 8, {src: full(8, 8), dst: full(8, 8), filter: "nearest"});
+        expect([...same]).toEqual([...source.pixels]);
+
+        const half = render(source, 4, 4, {src: full(8, 8), dst: full(4, 4), filter: "nearest"});
+        // Texel (1, 2) covers source pixels 2-3 and 4-5; its centre falls on (3, 5).
+        expect(pixelAt(half, 4, 1, 2)).toEqual([90, 150, 100, 255]);
+    });
+
+    it("never blends neighbours, even at the edge of padding", () => {
+        const source = image(4, 2, (x) => x % 2 ? [255, 255, 255, 255] : [0, 0, 0, 255]);
+        const out = render(source, 4, 4, {src: full(4, 2), dst: {x0: 0, y0: 1, x1: 4, y1: 3}, filter: "nearest"});
+        for (let i = 0; i < out.length; i += 4) {
+            if (out[i + 3]) expect([0, 255]).toContain(out[i]);
+        }
+        expect(pixelAt(out, 4, 0, 0)[3]).toBe(0);
+    });
+});

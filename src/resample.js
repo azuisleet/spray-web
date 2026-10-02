@@ -35,7 +35,11 @@ function mirror(index, size) {
     return wrapped < size ? wrapped : period - 1 - wrapped;
 }
 
-export function axisTaps(srcSize, srcStart, srcEnd, dstSize, dstStart, dstEnd) {
+export const filterSmooth = "smooth";
+// One source pixel per texel, never blended: for pixel art.
+export const filterNearest = "nearest";
+
+export function axisTaps(srcSize, srcStart, srcEnd, dstSize, dstStart, dstEnd, filter = filterSmooth) {
     const scale = (srcEnd - srcStart) / (dstEnd - dstStart);
     const filterScale = Math.max(1, scale);
     const radius = support * filterScale;
@@ -49,6 +53,13 @@ export function axisTaps(srcSize, srcStart, srcEnd, dstSize, dstStart, dstEnd) {
         offsets[i] = indices.length;
         coverage[i] = Math.max(0, Math.min(i + 1, dstEnd) - Math.max(i, dstStart));
         if (coverage[i] === 0) continue;
+
+        if (filter === filterNearest) {
+            // The source pixel under the texel's centre.
+            indices.push(mirror(Math.floor(srcStart + (i + 0.5 - dstStart) * scale), srcSize));
+            weights.push(1);
+            continue;
+        }
 
         const centre = srcStart + (i + 0.5 - dstStart) * scale - 0.5;
         const first = Math.ceil(centre - radius);
@@ -80,8 +91,8 @@ export function sourceRowRange(taps, rowStart, rowEnd) {
     return first === Infinity ? [0, 0] : [first, end];
 }
 
-export function verticalTaps(sourceHeight, targetHeight, {src, dst}) {
-    return axisTaps(sourceHeight, src.y0, src.y1, targetHeight, dst.y0, dst.y1);
+export function verticalTaps(sourceHeight, targetHeight, {src, dst, filter}) {
+    return axisTaps(sourceHeight, src.y0, src.y1, targetHeight, dst.y0, dst.y1, filter);
 }
 
 /**
@@ -91,13 +102,13 @@ export function verticalTaps(sourceHeight, targetHeight, {src, dst}) {
  *
  * @param source {pixels, width, height, rowOffset}: pixels holds rows from rowOffset on,
  *        at least the ones sourceRowRange asks for.
- * @param placement {src, dst}, as from placeInTexture
+ * @param placement {src, dst, filter}, as from placeTarget; filter defaults to smooth
  * @returns unpremultiplied RGBA for just those rows
  */
 export function resampleRows(source, targetWidth, targetHeight, placement, rowStart, rows) {
     const {pixels, width: srcWidth, height: srcHeight, rowOffset} = source;
     const {src, dst} = placement;
-    const xTaps = axisTaps(srcWidth, src.x0, src.x1, targetWidth, dst.x0, dst.x1);
+    const xTaps = axisTaps(srcWidth, src.x0, src.x1, targetWidth, dst.x0, dst.x1, placement.filter);
     const yTaps = verticalTaps(srcHeight, targetHeight, placement);
     const [srcFirst, srcEnd] = sourceRowRange(yTaps, rowStart, rowStart + rows);
     // Clamped storage rounds and clamps on write, which also absorbs the overshoot from

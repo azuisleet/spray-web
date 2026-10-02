@@ -1,10 +1,18 @@
-const imageFormatDXT1 = 13;
+// From ImageFormat in the SDK's public/bitmap/imageformat.h. All three work for sprays in
+// TF2 (scripts/test-sprays.mjs): DXT5 keeps soft edges and partial transparency, since the
+// spray material blends alpha, and BGRA8888 keeps exact colour and 8-bit alpha.
+export const imageFormatBGRA8888 = 12;
+export const imageFormatDXT1 = 13;
+export const imageFormatDXT5 = 15;
+
 const dxt1BlockBytes = 8;
 
 export const headerSize = 0x40;
 
 const flagClampS = 0x0004;
 const flagClampT = 0x0008;
+// Honoured on sprays: a point sampled spray stays sharp and blocky up close.
+export const flagPointSample = 0x0001;
 export const flagNoMip = 0x0100;
 const flagNoLod = 0x0200;
 // vtex sets one of these from the texture data: ONEBITALPHA for 1-bit alpha like ours,
@@ -23,7 +31,7 @@ export const baseFlags = flagClampS | flagClampT | flagNoLod | flagOneBitAlpha;
 // 1024x1024 (524,352 bytes) does not fit.
 export const maximumSize = (1024 * 512) - 0x80;
 
-export function buildHeader(width, height, frames, mipCount, flags) {
+export function buildHeader(width, height, frames, mipCount, flags, imageFormat = imageFormatDXT1) {
     const header = new Uint8Array(headerSize);
     const view = new DataView(header.buffer);
 
@@ -37,7 +45,7 @@ export function buildHeader(width, height, frames, mipCount, flags) {
     view.setUint16(0x18, frames, true);
     view.setUint16(0x1A, 0, true);                  // first frame
     // 0x1C padding, 0x20 reflectivity[3], 0x2C padding, 0x30 bumpmap scale
-    view.setUint32(0x34, imageFormatDXT1, true);    // high res image format
+    view.setUint32(0x34, imageFormat, true);        // high res image format
     view.setUint8(0x38, mipCount);
     view.setUint32(0x39, imageFormatDXT1, true);    // low res image format
     view.setUint8(0x3D, 0);                         // low res width, 0 = no thumbnail

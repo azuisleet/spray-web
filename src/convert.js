@@ -1,16 +1,30 @@
 import {openImage} from "./decode.js";
 import {getEncoderPool} from "./encoderPool.js";
 import {
-    chooseFrameIndices, chooseSwapLevel, chooseTarget, engineFrameRate, fitGeometry, fitPad, placeInTexture,
+    chooseFrameIndices, chooseSwapLevel, chooseTarget, engineFrameRate, fitGeometry, fitPad, placeTarget,
     preferBalanced, targetFrameCount,
 } from "./plan.js";
-import {baseFlags, buildHeader, flagNoMip, headerSize, mipDimensions} from "./vtf.js";
+import {filterNearest, filterSmooth} from "./resample.js";
+import {textureFormats} from "./textureFormats.js";
+import {baseFlags, buildHeader, flagEightBitAlpha, flagNoMip, flagOneBitAlpha, flagPointSample, headerSize, mipDimensions} from "./vtf.js";
 
 // Levels under 4x4 still cost a whole DXT1 block, so they are drawn at 4x4.
 const minBlockDimension = 4;
 
 // Share of the progress bar given to opening the image, before any strip is finished.
 const openedShare = 0.1;
+
+// Share of pixels that must be partly transparent before an image counts as having soft
+// edges: enough to rule out the odd stray pixel of a hard edged image.
+const softAlphaShare = 0.002;
+
+function hasSoftAlpha(pixels) {
+    let partial = 0;
+    for (let i = 3; i < pixels.length; i += 4) {
+        if (pixels[i] > 0 && pixels[i] < 255) partial++;
+    }
+    return partial > (pixels.length / 4) * softAlphaShare;
+}
 
 // Longest side of the thumbnail probeImage returns, unless asked for another.
 const defaultThumbnailSize = 512;
@@ -19,7 +33,9 @@ const defaultThumbnailSize = 512;
  * Reads what planning needs from an image without converting it, plus a thumbnail of the
  * first frame for showing the source.
  *
- * @returns {width, height, frameCount, durations (ms), thumbnail: ImageBitmap}
+ * @returns {width, height, frameCount, durations (ms), thumbnail: ImageBitmap, softAlpha,
+ *          video}, where softAlpha says the first frame has partial transparency worth
+ *          keeping, and video is {duration} in seconds for a video, else null
  */
 export async function probeImage(file, {signal, thumbnailSize = defaultThumbnailSize} = {}) {
     const image = await openImage(file);
@@ -28,7 +44,11 @@ export async function probeImage(file, {signal, thumbnailSize = defaultThumbnail
         signal?.throwIfAborted();
 
         let thumbnail = null;
-        for await (const [, pixels] of image.frames([0])) {
+        let softAlpha = false;
+        // Videos often open on a fade or a title, so theirs comes from the middle.
+        const thumbnailFrame = image.duration !== undefined ? Math.floor(image.frameCount / 2) : 0;
+        for await (const [, pixels] of image.frames([thumbnailFrame])) {
+            softAlpha = hasSoftAlpha(pixels);
             const scale = Math.min(1, thumbnailSize / Math.max(image.width, image.height));
             thumbnail = await createImageBitmap(new ImageData(new Uint8ClampedArray(pixels), image.width, image.height), {
                 resizeWidth: Math.max(1, Math.round(image.width * scale)),
@@ -37,7 +57,9 @@ export async function probeImage(file, {signal, thumbnailSize = defaultThumbnail
             });
         }
 
-        return {width: image.width, height: image.height, frameCount: image.frameCount, durations, thumbnail};
+        // A video's length lets the caller choose a span; its timings depend on that span.
+        const video = image.duration !== undefined ? {duration: image.duration} : null;
+        return {width: image.width, height: image.height, frameCount: image.frameCount, durations, thumbnail, softAlpha, video};
     } finally {
         image.close();
     }
@@ -66,12 +88,17 @@ function yieldToEventLoop() {
  *   preference preferBalanced, preferDetail or preferMotion, for when it will not all fit
  *   fit        fitPad, fitCrop or fitStretch: how the image meets the square decal
  *   focus      {x, y} in 0..1, which part of the image a crop keeps
+ *   softEdges  keep 8-bit alpha (DXT5) so soft edges and partial transparency survive
+ *   pixelArt   whole pixels only, point sampled in game, uncompressed when that costs
+ *              nothing; ignored for a mip trick
+ *   trim       {start, end} in seconds: the span of a video to use (default: its start)
  *   keepAllFrames  plan for every source frame rather than for real-time playback at
  *              the engine's 5 fps; the spray then plays slower than the original
  *   signal     AbortSignal; aborting rejects with signal.reason
  *   onProgress called with 0..1
  * @returns {blob, levels, width, height, frames, sourceFrames, mipCount, padding, bytes,
- *           swapLevel, swapDimension, playSeconds, sourceSeconds}, where
+ *           swapLevel, swapDimension, format, pointSample, pixelScale, playSeconds,
+ *           sourceSeconds}, where
  *           levels[level][frame] is the DXT1 data
  */
 export async function convertImage(file, options = {}) {
@@ -81,6 +108,9 @@ export async function convertImage(file, options = {}) {
         fit = fitPad,
         focus,
         keepAllFrames = false,
+        softEdges = false,
+        pixelArt = false,
+        trim,
         signal,
         onProgress = () => {},
     } = options;
@@ -90,7 +120,7 @@ export async function convertImage(file, options = {}) {
     let farImage = null;
 
     try {
-        image = await openImage(file);
+        image = await openImage(file, {trim});
         farImage = mipTrick ? await openImage(mipTrick.file) : null;
         signal?.throwIfAborted();
         // A still is decoded by now, often the longest single step, so say so before the
@@ -105,7 +135,7 @@ export async function convertImage(file, options = {}) {
         signal?.throwIfAborted();
         const wantedFrames = targetFrameCount(durations, {keepAllFrames});
 
-        const target = chooseTarget(width, height, wantedFrames, {useMips, preference, fit});
+        const target = chooseTarget(width, height, wantedFrames, {useMips, preference, fit, softEdges, pixelArt});
         if (!target) throw new Error("Image cannot be fit inside the 512 KB spray limit");
 
         const {targetWidth, targetHeight, frames: nFrames} = target;
@@ -118,12 +148,19 @@ export async function convertImage(file, options = {}) {
 
         const levelDimensions = useMips ? mipDimensions(targetWidth, targetHeight) : [[targetWidth, targetHeight]];
         const mipCount = levelDimensions.length;
-        const flags = useMips ? baseFlags : baseFlags | flagNoMip;
+        const {format} = target;
+        const pointSample = !!target.pixel;
+        // The format decides which alpha flag fits; pixel art is point sampled so it stays
+        // blocky up close.
+        let flags = (baseFlags & ~(flagOneBitAlpha | flagEightBitAlpha)) | textureFormats[format].alphaFlag;
+        if (!useMips) flags |= flagNoMip;
+        if (pointSample) flags |= flagPointSample;
+        const filter = pointSample ? filterNearest : filterSmooth;
         const swapLevel = useMips ? chooseSwapLevel(targetWidth, targetHeight, mipTrick.swapPixels) : mipCount;
 
         const levelFor = (geometry) => ([w, h]) => {
             const level = {width: Math.max(minBlockDimension, w), height: Math.max(minBlockDimension, h)};
-            return {...level, placement: placeInTexture(geometry, level.width, level.height)};
+            return {...level, format, placement: {...placeTarget(geometry, target, level.width, level.height), filter}};
         };
         const nearLevels = levelDimensions.slice(0, swapLevel).map(levelFor(fitGeometry(width, height, fit, focus)));
         const farLevels = farImage
@@ -191,7 +228,7 @@ export async function convertImage(file, options = {}) {
         for (let level = mipCount - 1; level >= 0; level--) buffers.push(...levels[level]);
 
         return {
-            blob: new Blob([buildHeader(targetWidth, targetHeight, nFrames, mipCount, flags), ...buffers], {type: "application/octet-stream"}),
+            blob: new Blob([buildHeader(targetWidth, targetHeight, nFrames, mipCount, flags, textureFormats[format].vtf), ...buffers], {type: "application/octet-stream"}),
             levels,
             width: targetWidth,
             height: targetHeight,
@@ -202,6 +239,10 @@ export async function convertImage(file, options = {}) {
             bytes: target.cost + headerSize,
             swapLevel: useMips ? swapLevel : null,
             swapDimension: useMips ? Math.max(...levelDimensions[swapLevel]) : null,
+            format,
+            pointSample,
+            pixelScale: target.pixel?.scale ?? null,
+            video: image.duration !== undefined,
             playSeconds: nFrames / engineFrameRate,
             sourceSeconds: durations.reduce((sum, d) => sum + d, 0) / 1000,
         };

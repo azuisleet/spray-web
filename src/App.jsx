@@ -1,13 +1,15 @@
-import {useMemo, useState, useSyncExternalStore} from 'react'
+import {useDeferredValue, useEffect, useEffectEvent, useMemo, useState, useSyncExternalStore} from 'react'
 import {BulkQueue} from "./bulkQueue.js";
 import Bulk from "./components/Bulk.jsx";
 import {ChoicePicker, OutputPanel} from "./components/Output.jsx";
 import Preview from "./components/Preview.jsx";
-import {DropZone, FitControl, SourceThumbnail} from "./components/Source.jsx";
+import {DropZone, FitControl, SourceThumbnail, TrimControl} from "./components/Source.jsx";
+import {defaultTrim, videoDurations} from "./decode.js";
 import {Label, Panel, ProgressBar, Spinner} from "./components/ui.jsx";
-import {acceptedNames, acceptedTypes} from "./formats.js";
+import {acceptedNames, acceptedTypes, namePasted} from "./formats.js";
 import {convertImage, probeImage} from "./convert.js";
-import {candidateChoices, fitPad, listCandidates} from "./plan.js";
+import {candidateChoices, fitCrop, fitPad, fitStretch, listCandidates} from "./plan.js";
+import {readSetting, useSetting, writeSetting} from "./settings.js";
 import {useConversion, useProbe} from "./useConversion.js";
 
 const modeSingle = "single";
@@ -47,20 +49,35 @@ function bulkActivity({items}) {
     return (done + (running?.progress ?? 0)) / active.length;
 }
 
+const choiceKeys = candidateChoices.map(choice => choice.key);
+const fits = [fitPad, fitCrop, fitStretch];
+
 function App() {
-    const [mode, setMode] = useState(modeSingle);
+    // Settings are remembered between visits; files and crop positions are not.
+    const [mode, setMode] = useSetting("mode", modes.map(([value]) => value), modeSingle);
     const [file, setFile] = useState(null);
     const [farFile, setFarFile] = useState(null);
-    const [swapPixels, setSwapPixels] = useState(64);
-    const [choiceKey, setChoiceKey] = useState("balanced");
-    const [fit, setFit] = useState(fitPad);
+    const [swapPixels, setSwapPixels] = useSetting("swapPixels", swapOptions.map(option => option.pixels), 64);
+    const [choiceKey, setChoiceKey] = useSetting("choice", choiceKeys, "balanced");
+    const [fit, setFit] = useSetting("fit", fits, fitPad);
     const [focus, setFocus] = useState(centred);
     const [farFocus, setFarFocus] = useState(centred);
+    // Null follows the image (on when it has soft edges); a choice sticks until the next image.
+    const [softEdgesChoice, setSoftEdgesChoice] = useState(null);
+    const [pixelArtChoice, setPixelArtChoice] = useState(false);
+    // Null uses the start of the video; a chosen span sticks until the next file.
+    const [trimChoice, setTrimChoice] = useState(null);
     const [notice, setNotice] = useState(null);
     // Kept here rather than in the bulk view so switching tabs keeps the list.
     const [bulkQueue] = useState(() => new BulkQueue({
         convert: convertImage,
         probe: (file) => probeImage(file, {thumbnailSize: bulkThumbnailSize}),
+        settings: {
+            choiceKey: readSetting("bulkChoice", choiceKeys, "balanced"),
+            fit: readSetting("bulkFit", fits, fitPad),
+            softEdges: readSetting("bulkSoftEdges", [true, false], true),
+            pixelArt: readSetting("bulkPixelArt", [true, false], false),
+        },
     }));
 
     const mipTrick = mode === modeMipTrick;
@@ -68,7 +85,7 @@ function App() {
     // Rejects unsupported files here, where the reason can still be shown.
     const accept = (onAccepted) => (selected) => {
         if (!acceptedTypes.includes(selected.type)) {
-            setNotice(`${selected.name} is not a ${acceptedNames} image`);
+            setNotice(`${selected.name} isn't a ${acceptedNames} file`);
             return;
         }
         setNotice(null);
@@ -77,20 +94,50 @@ function App() {
     const selectFile = accept((selected) => {
         setFile(selected);
         setFocus(centred);
+        setSoftEdgesChoice(null);
+        setTrimChoice(null);
     });
     const selectFarFile = accept((selected) => {
         setFarFile(selected);
         setFarFocus(centred);
     });
 
+    // Ctrl+V anywhere: a pasted image becomes the image here, or joins the bulk queue.
+    const onPaste = useEffectEvent((event) => {
+        const pasted = [...(event.clipboardData?.files ?? [])].filter(f => acceptedTypes.includes(f.type)).map(f => namePasted(f));
+        if (!pasted.length) return;
+        event.preventDefault();
+        if (mode === modeBulk) bulkQueue.add(pasted);
+        else selectFile(pasted[0]);
+    });
+    useEffect(() => {
+        const listener = (event) => onPaste(event);
+        window.addEventListener("paste", listener);
+        return () => window.removeEventListener("paste", listener);
+    }, []);
+
     const probe = useProbe(file);
     const info = probe.info;
+    const softEdges = softEdgesChoice ?? !!info?.softAlpha;
+    // Pixel art keeps whole pixels, which a mip chain would blend away.
+    const pixelArt = pixelArtChoice && !mipTrick;
+    const video = info?.video ?? null;
+    // Memoised: the span is part of the conversion job, and a fresh object on every render
+    // would restart the conversion on every render.
+    const trim = useMemo(() => video ? trimChoice ?? defaultTrim(video.duration) : null, [video, trimChoice]);
+    // Dragging the trim sliders updates them at once; planning follows when there is time.
+    const plannedTrim = useDeferredValue(trim);
+    const durations = useMemo(
+        () => video && plannedTrim ? videoDurations(plannedTrim.end - plannedTrim.start) : info?.durations,
+        [video, plannedTrim, info]);
     const farProbe = useProbe(mipTrick ? farFile : null);
 
     const candidates = useMemo(
-        () => info ? listCandidates(info.width, info.height, info.durations, {useMips: mipTrick, fit}) : [],
-        [info, mipTrick, fit]);
-    const choice = candidateChoices.find(c => c.key === choiceKey);
+        // Every frame of a video means its 30 a second played at 5: not worth offering.
+        () => info ? listCandidates(info.width, info.height, durations, {useMips: mipTrick, fit, softEdges, pixelArt})
+            .filter(candidate => !(video && candidate.keepAllFrames)) : [],
+        [info, durations, video, mipTrick, fit, softEdges, pixelArt]);
+    const choice = candidateChoices.find(c => c.key === (video && choiceKey === "all" ? "balanced" : choiceKey));
 
     const job = useMemo(() => {
         if (!file) return null;
@@ -102,10 +149,13 @@ function App() {
                 keepAllFrames: choice.keepAllFrames,
                 fit,
                 focus,
+                softEdges,
+                pixelArt,
+                trim: plannedTrim,
                 mipTrick: mipTrick ? {file: farFile, swapPixels, focus: farFocus} : null,
             },
         };
-    }, [file, farFile, mipTrick, swapPixels, choice, fit, focus, farFocus]);
+    }, [file, farFile, mipTrick, swapPixels, choice, fit, focus, farFocus, softEdges, pixelArt, plannedTrim]);
 
     const {status, progress, result, error} = useConversion(job);
     const converting = status === "converting";
@@ -113,6 +163,13 @@ function App() {
 
     // Shown under the header whatever the view, so work in progress is never missed.
     const bulkSnapshot = useSyncExternalStore(bulkQueue.subscribe, bulkQueue.getSnapshot);
+
+    useEffect(() => {
+        writeSetting("bulkChoice", bulkSnapshot.settings.choiceKey);
+        writeSetting("bulkFit", bulkSnapshot.settings.fit);
+        writeSetting("bulkSoftEdges", bulkSnapshot.settings.softEdges);
+        writeSetting("bulkPixelArt", bulkSnapshot.settings.pixelArt);
+    }, [bulkSnapshot.settings]);
     const activity = mode === modeBulk ? bulkActivity(bulkSnapshot) : converting ? progress : null;
 
     return (
@@ -150,9 +207,10 @@ function App() {
             {mode === modeBulk ? <Bulk queue={bulkQueue}/> : (
                 <main className="mx-auto grid w-full max-w-7xl grow items-start gap-6 p-6 md:grid-cols-[minmax(14rem,18rem)_minmax(0,1fr)] lg:grid-cols-[minmax(14rem,18rem)_minmax(0,1fr)_minmax(14rem,18rem)]">
                     <Panel title="Source">
-                        <DropZone label={mipTrick ? "Close up" : "Image"} hint="drop or choose an image"
+                        <DropZone label={mipTrick ? "Close up" : "Image or video"} hint="drop, choose or paste one"
                                   file={file} onSelect={selectFile} compact={!!info}/>
-                        {info && <SourceThumbnail info={info} fit={fit} focus={focus} onFocus={setFocus}/>}
+                        {info && <SourceThumbnail info={info} fit={fit} focus={focus} onFocus={setFocus} pixelated={pixelArt}/>}
+                        {video && <TrimControl duration={video.duration} trim={trim} onTrim={setTrimChoice}/>}
                         {probe.status === "error" && <div className="text-sm text-alarm">Could not read {file.name}: {probe.error.message}</div>}
                         {mipTrick && (
                             <>
@@ -173,6 +231,32 @@ function App() {
                             <Label>Fit to the square spray</Label>
                             <FitControl fit={fit} onChange={setFit}/>
                         </div>
+                        <div className="flex flex-col gap-2 text-sm">
+                            <label className="flex items-start gap-2">
+                                <input type="checkbox" className="mt-1" checked={softEdges}
+                                       onChange={(event) => setSoftEdgesChoice(event.target.checked)}/>
+                                <span>
+                                    Soft edges
+                                    <span className="block text-steel dark:text-zinc-400">
+                                        {info?.softAlpha && softEdgesChoice === null
+                                            ? "On because this image has them. Uses twice the bytes per pixel."
+                                            : "Keeps partial transparency, at twice the bytes per pixel."}
+                                    </span>
+                                </span>
+                            </label>
+                            <label className={`flex items-start gap-2 ${mipTrick ? "opacity-50" : ""}`}>
+                                <input type="checkbox" className="mt-1" checked={pixelArt} disabled={mipTrick}
+                                       onChange={(event) => setPixelArtChoice(event.target.checked)}/>
+                                <span>
+                                    Pixel art
+                                    <span className="block text-steel dark:text-zinc-400">
+                                        {mipTrick
+                                            ? "Not available with a mip trick."
+                                            : "Keeps every pixel whole and sharp in game, in exact colour when it fits."}
+                                    </span>
+                                </span>
+                            </label>
+                        </div>
                         {notice && <div className="text-sm text-alarm">{notice}</div>}
                     </Panel>
 
@@ -180,13 +264,13 @@ function App() {
                         <Preview result={result} converting={converting} progress={progress}
                                  emptyText={mipTrick && file && !farFile
                                      ? "Add the distant image to make the spray"
-                                     : `Drop a ${acceptedNames} anywhere to make a spray`}/>
+                                     : `Drop or paste a ${acceptedNames} anywhere to make a spray`}/>
                         {status === "error" && <div className="text-sm text-alarm">Failed to convert: {error.message}</div>}
                     </Panel>
 
                     <Panel title="Spray">
                         {!file && <p className="text-sm text-zinc-500 dark:text-zinc-400">Size and frame options appear here once there is an image.</p>}
-                        <ChoicePicker candidates={candidates} selected={choiceKey} onSelect={setChoiceKey}/>
+                        <ChoicePicker candidates={candidates} selected={choice.key} onSelect={setChoiceKey}/>
                         {status === "done" && <OutputPanel result={result} baseName={baseName}/>}
                         {converting && (
                             <div className="flex flex-col gap-2 border-l-4 border-paint py-1 pl-3" aria-live="polite">

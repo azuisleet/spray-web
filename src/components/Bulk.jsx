@@ -8,6 +8,7 @@ import {OutputPanel} from "./Output.jsx";
 import Preview from "./Preview.jsx";
 import {FitControl} from "./Source.jsx";
 import {headingClass} from "./styles.js";
+import {useSetting} from "../settings.js";
 
 function baseNameOf(file) {
     const dot = file.name.lastIndexOf(".");
@@ -118,7 +119,7 @@ function Row({item, settings, selected, onSelect, queue}) {
 export default function Bulk({queue}) {
     const {items, settings} = useSyncExternalStore(queue.subscribe, queue.getSnapshot);
     const [selectedId, setSelectedId] = useState(null);
-    const [includeVMT, setIncludeVMT] = useState(false);
+    const [includeVMT, setIncludeVMT] = useSetting("includeVMT", [true, false], false);
     const [notice, setNotice] = useState(null);
     const filesRef = useRef(null);
     const folderRef = useRef(null);
@@ -130,7 +131,7 @@ export default function Bulk({queue}) {
     const addFiles = (files) => {
         const images = files.filter(file => acceptedTypes.includes(file.type));
         const skipped = files.length - images.length;
-        setNotice(skipped ? `Skipped ${skipped} file${skipped === 1 ? "" : "s"} that ${skipped === 1 ? "is not a" : "are not"} ${acceptedNames} image${skipped === 1 ? "" : "s"}` : null);
+        setNotice(skipped ? `Skipped ${skipped} file${skipped === 1 ? "" : "s"} that ${skipped === 1 ? "isn't a" : "aren't"} ${acceptedNames} file${skipped === 1 ? "" : "s"}` : null);
         if (images.length) queue.add(images);
     };
 
@@ -167,7 +168,7 @@ export default function Bulk({queue}) {
             <section className="flex min-w-0 flex-col gap-3">
                 <h2 className={`border-b border-zinc-300 pb-1 dark:border-zinc-700 ${headingClass}`}>Files</h2>
                 <div className="flex flex-col items-center gap-2 rounded-sm border-2 border-dashed border-zinc-400 px-3 py-6 text-center">
-                    <div className="font-semibold">Drop images or folders</div>
+                    <div className="font-semibold">Drop or paste images, or drop folders</div>
                     <div className="flex gap-2 text-sm">
                         <button type="button" className="cursor-pointer underline" onClick={() => filesRef.current.click()}>choose files</button>
                         <span className="opacity-60">or</span>
@@ -194,6 +195,22 @@ export default function Bulk({queue}) {
                     <span className="text-sm text-steel dark:text-zinc-400">Fit to the square spray</span>
                     <FitControl fit={settings.fit} onChange={(fit) => queue.setSettings({fit})}/>
                 </div>
+                <label className="flex items-start gap-2 text-sm">
+                    <input type="checkbox" className="mt-1" checked={settings.softEdges}
+                           onChange={(event) => queue.setSettings({softEdges: event.target.checked})}/>
+                    <span>
+                        Soft edges
+                        <span className="block text-steel dark:text-zinc-400">For images that have them, at twice the bytes per pixel.</span>
+                    </span>
+                </label>
+                <label className="flex items-start gap-2 text-sm">
+                    <input type="checkbox" className="mt-1" checked={settings.pixelArt}
+                           onChange={(event) => queue.setSettings({pixelArt: event.target.checked})}/>
+                    <span>
+                        Pixel art
+                        <span className="block text-steel dark:text-zinc-400">Every pixel whole and sharp in game.</span>
+                    </span>
+                </label>
 
                 <label className="flex items-center gap-2 text-sm" title="TF2's spray import writes its own; these are only for copying files in by hand">
                     <input type="checkbox" checked={includeVMT} onChange={(event) => setIncludeVMT(event.target.checked)}/>

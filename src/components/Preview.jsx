@@ -1,6 +1,7 @@
 import {useEffect, useRef, useState} from "react";
-import {decodeDXT1} from "../dxt1.js";
+import {codecs} from "../codecs.js";
 import {engineFrameRate, mipAt} from "../plan.js";
+import {useSetting} from "../settings.js";
 import {ProgressBar, Spinner} from "./ui.jsx";
 
 // Canvas resolution until the preview box has been measured.
@@ -26,11 +27,12 @@ function useLevels(result) {
         if (!result) return;
         let cancelled = false;
         const {width, height, levels} = result;
+        const {decode} = codecs[result.format];
         Promise.all(levels.map((frames, level) => {
             const w = Math.max(1, width >> level);
             const h = Math.max(1, height >> level);
             return Promise.all(frames.map(blocks =>
-                createImageBitmap(new ImageData(new Uint8ClampedArray(decodeDXT1(w, h, blocks).buffer), w, h))));
+                createImageBitmap(new ImageData(new Uint8ClampedArray(decode(w, h, blocks).buffer), w, h))));
         })).then(bitmaps => {
             if (!cancelled) setDecoded({result, levels: bitmaps});
         });
@@ -156,7 +158,7 @@ export default function Preview({result, converting, progress, emptyText}) {
     const [playing, setPlaying] = useState(true);
     const [pausedFrame, setPausedFrame] = useState(0);
     const [clockFrame, setClockFrame] = useState(0);
-    const [background, setBackground] = useState(backgrounds[0].key);
+    const [background, setBackground] = useSetting("background", backgrounds.map(b => b.key), backgrounds[0].key);
     const [smooth, setSmooth] = useState(true);
     const [screenLog2, setScreenLog2] = useState(nearestLog2);
     const [magnify, setMagnify] = useState(false);
@@ -164,6 +166,7 @@ export default function Preview({result, converting, progress, emptyText}) {
     const frameCount = levels?.[0].length ?? 0;
     const shown = frameCount ? (playing ? clockFrame : pausedFrame) % frameCount : 0;
     const hasMips = !!result && result.mipCount > 1;
+    const pointSample = !!result?.pointSample;
     const screenPixels = 2 ** screenLog2;
     const mip = hasMips ? mipAt(result.width, result.height, result.mipCount, screenPixels) : null;
     // Screen pixels are device pixels here, as they are in the game.
@@ -189,7 +192,8 @@ export default function Preview({result, converting, progress, emptyText}) {
         if (!levels?.[0][shown]) return;
 
         if (!hasMips) {
-            context.imageSmoothingEnabled = smooth;
+            // Point sampled sprays are never smoothed in game, so not here either.
+            context.imageSmoothingEnabled = smooth && !pointSample;
             context.imageSmoothingQuality = "high";
             context.drawImage(levels[0][shown], 0, 0, deviceSize, deviceSize);
             return;
@@ -219,7 +223,7 @@ export default function Preview({result, converting, progress, emptyText}) {
             const offset = Math.floor((deviceSize - size) / 2);
             context.drawImage(screen, offset, offset);
         }
-    }, [levels, shown, smooth, hasMips, screenSize, deviceSize, magnified, mip?.lower, mip?.upper, mip?.blend]);
+    }, [levels, shown, smooth, pointSample, hasMips, screenSize, deviceSize, magnified, mip?.lower, mip?.upper, mip?.blend]);
 
     const step = (delta) => {
         setPlaying(false);
@@ -278,9 +282,13 @@ export default function Preview({result, converting, progress, emptyText}) {
                             onClick={() => setBackground(b.key)}
                             className={`h-5 w-5 cursor-pointer rounded-full border ${b.className} ${background === b.key ? "border-paint ring-2 ring-paint" : "border-zinc-400"}`}/>
                 ))}
-                <IconButton label={smooth ? "Show texels" : "Smooth, as in game"} onClick={() => setSmooth(!smooth)}>
-                    {smooth ? "Smooth" : "Texels"}
-                </IconButton>
+                {pointSample
+                    ? <span className="px-2 py-1 text-steel dark:text-zinc-400" title="Pixel art is point sampled: TF2 draws it unsmoothed">Point sampled</span>
+                    : (
+                        <IconButton label={smooth ? "Show texels" : "Smooth, as in game"} onClick={() => setSmooth(!smooth)}>
+                            {smooth ? "Smooth" : "Texels"}
+                        </IconButton>
+                    )}
             </div>
 
             {hasMips && levels && (

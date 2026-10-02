@@ -1,4 +1,3 @@
-/* global ImageDecoder -- WebCodecs, newer than the eslint browser globals */
 import {decodeGifFrames, parseGif} from "./gif.js";
 
 // JPEG and friends go through createImageBitmap, which is also what applies EXIF rotation.

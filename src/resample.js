@@ -22,12 +22,21 @@ function catmullRom(x) {
 }
 
 /**
- * Filter taps along one axis: the image spans [start, end) of the target's dstSize pixels
- * (fractional is fine). Pixels the image does not touch get no taps; edge pixels it only
- * partly covers keep that coverage, which later scales their alpha.
+ * Filter taps along one axis: source span [srcStart, srcEnd) of a srcSize image lands on
+ * [dstStart, dstEnd) of the target's dstSize pixels (fractional is fine on both). Pixels
+ * the image does not touch get no taps; edge pixels it only partly covers keep that
+ * coverage, which later scales their alpha. Taps past a cropped span read the pixels
+ * beyond it, so a crop has no artificial edge; past the image's own border they mirror
+ * back in, which unlike repeating the edge pixel does not overweight it.
  */
-export function axisTaps(srcSize, dstSize, start, end) {
-    const scale = srcSize / (end - start);
+function mirror(index, size) {
+    const period = 2 * size;
+    const wrapped = ((index % period) + period) % period;
+    return wrapped < size ? wrapped : period - 1 - wrapped;
+}
+
+export function axisTaps(srcSize, srcStart, srcEnd, dstSize, dstStart, dstEnd) {
+    const scale = (srcEnd - srcStart) / (dstEnd - dstStart);
     const filterScale = Math.max(1, scale);
     const radius = support * filterScale;
 
@@ -38,10 +47,10 @@ export function axisTaps(srcSize, dstSize, start, end) {
 
     for (let i = 0; i < dstSize; i++) {
         offsets[i] = indices.length;
-        coverage[i] = Math.max(0, Math.min(i + 1, end) - Math.max(i, start));
+        coverage[i] = Math.max(0, Math.min(i + 1, dstEnd) - Math.max(i, dstStart));
         if (coverage[i] === 0) continue;
 
-        const centre = (i + 0.5 - start) * scale - 0.5;
+        const centre = srcStart + (i + 0.5 - dstStart) * scale - 0.5;
         const first = Math.ceil(centre - radius);
         const last = Math.floor(centre + radius);
         const begin = indices.length;
@@ -50,7 +59,7 @@ export function axisTaps(srcSize, dstSize, start, end) {
         for (let j = first; j <= last; j++) {
             const weight = catmullRom((j - centre) / filterScale);
             if (weight === 0) continue;
-            indices.push(j < 0 ? 0 : j >= srcSize ? srcSize - 1 : j);
+            indices.push(mirror(j, srcSize));
             weights.push(weight);
             total += weight;
         }
@@ -71,18 +80,25 @@ export function sourceRowRange(taps, rowStart, rowEnd) {
     return first === Infinity ? [0, 0] : [first, end];
 }
 
+export function verticalTaps(sourceHeight, targetHeight, {src, dst}) {
+    return axisTaps(sourceHeight, src.y0, src.y1, targetHeight, dst.y0, dst.y1);
+}
+
 /**
- * Renders target rows [rowStart, rowStart + rows) of a targetWidth x targetHeight image
- * with the source drawn into rect (fractional target pixels).
+ * Renders target rows [rowStart, rowStart + rows) of a targetWidth x targetHeight image,
+ * with the src rectangle of the source drawn into the dst rectangle of the target (both
+ * in fractional pixels).
  *
  * @param source {pixels, width, height, rowOffset}: pixels holds rows from rowOffset on,
  *        at least the ones sourceRowRange asks for.
+ * @param placement {src, dst}, as from placeInTexture
  * @returns unpremultiplied RGBA for just those rows
  */
-export function resampleRows(source, targetWidth, targetHeight, rect, rowStart, rows) {
+export function resampleRows(source, targetWidth, targetHeight, placement, rowStart, rows) {
     const {pixels, width: srcWidth, height: srcHeight, rowOffset} = source;
-    const xTaps = axisTaps(srcWidth, targetWidth, rect.x0, rect.x1);
-    const yTaps = axisTaps(srcHeight, targetHeight, rect.y0, rect.y1);
+    const {src, dst} = placement;
+    const xTaps = axisTaps(srcWidth, src.x0, src.x1, targetWidth, dst.x0, dst.x1);
+    const yTaps = verticalTaps(srcHeight, targetHeight, placement);
     const [srcFirst, srcEnd] = sourceRowRange(yTaps, rowStart, rowStart + rows);
     // Clamped storage rounds and clamps on write, which also absorbs the overshoot from
     // the filter's negative lobes.

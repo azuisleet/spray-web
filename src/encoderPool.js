@@ -1,4 +1,4 @@
-import {axisTaps, sourceRowRange} from "./resample.js";
+import {sourceRowRange, verticalTaps} from "./resample.js";
 
 // Output pixels per task, about 10 ms of resampling and encoding: large enough that
 // messaging is noise, small enough that one big mip spreads across every worker.
@@ -58,12 +58,22 @@ export function createEncoderPool(size) {
 
     for (let i = 0; i < size; i++) spawn();
 
-    function submit(message, transfer) {
+    function submit(message, transfer, signal) {
         if (live === 0) return Promise.reject(new Error("No encoder workers are running"));
         return new Promise((resolve, reject) => {
-            queue.push({id: nextId++, message, transfer, resolve, reject});
+            queue.push({id: nextId++, message, transfer, signal, resolve, reject});
             pump();
         });
+    }
+
+    // Queued work for a cancelled job is dropped; strips already running finish and are
+    // thrown away, which is never more than one strip per worker.
+    function cancelQueued(signal) {
+        for (let i = queue.length - 1; i >= 0; i--) {
+            if (queue[i].signal !== signal) continue;
+            queue[i].reject(signal.reason);
+            queue.splice(i, 1);
+        }
     }
 
     return {
@@ -74,14 +84,15 @@ export function createEncoderPool(size) {
          * copied out before this returns, so the caller may reuse source.pixels at once.
          *
          * @param source {pixels, width, height}: unpremultiplied RGBA
-         * @param level {width, height, rect: {x0, y0, x1, y1}}: rect is where the source
-         *        lands in the level, in fractional pixels
+         * @param level {width, height, placement: {src, dst}}, as from placeInTexture
+         * @param signal optional AbortSignal; aborting drops this level's queued strips
          * @returns Promise of the level's DXT1 blocks
          */
-        async render(source, level) {
+        async render(source, level, signal) {
+            signal?.throwIfAborted();
             const {width, height} = level;
             const stripRows = Math.max(4, Math.floor(pixelsPerTask / width / 4) * 4);
-            const yTaps = axisTaps(source.height, height, level.rect.y0, level.rect.y1);
+            const yTaps = verticalTaps(source.height, height, level.placement);
             const rowBytes = source.width * 4;
 
             const strips = [];
@@ -94,10 +105,18 @@ export function createEncoderPool(size) {
                     level,
                     rowStart,
                     rows,
-                }, [pixels.buffer]));
+                }, [pixels.buffer], signal));
             }
 
-            const parts = await Promise.all(strips);
+            const onAbort = () => cancelQueued(signal);
+            signal?.addEventListener("abort", onAbort, {once: true});
+            let parts;
+            try {
+                parts = await Promise.all(strips);
+            } finally {
+                signal?.removeEventListener("abort", onAbort);
+            }
+            signal?.throwIfAborted();
             if (parts.length === 1) return parts[0];
             const blocks = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
             let offset = 0;

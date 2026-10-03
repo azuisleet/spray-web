@@ -16,6 +16,10 @@
  * that differs: the image format (15 DXT5, 12 BGRA8888, 13 DXT1) or the point sampling
  * flag (0x1, or 0x0 without). In TF2 all of them behaved as their notes describe.
  *
+ * Untested formats follow, captioned with their format number: 3 BGR888, 17 BGR565 and
+ * 19 BGRA4444. Each is at a size only it could fit next to its known-good neighbour,
+ * with a small BGR888 control in case the large one fails for its size, not its format.
+ *
  * Every pattern is drawn in pure colours on black, sharp-edged, so DXT1 keeps it
  * close to exact and any blur or misplacement seen in game is the engine's doing.
  */
@@ -24,12 +28,17 @@ import path from "path";
 import zlib from "zlib";
 import {decodeDXT1, encodeDXT1} from "../src/dxt1.js";
 import {decodeDXT5, encodeDXT5} from "../src/dxt5.js";
+import {vtfFormats} from "../src/vtfRead.js";
 import {
     baseFlags, buildHeader, buildVMT, dxt1Size, flagEightBitAlpha, flagNoMip, flagOneBitAlpha, flagPointSample, headerSize,
     imageFormatBGRA8888, imageFormatDXT1, imageFormatDXT5, maximumSize, mipDimensions,
 } from "../src/vtf.js";
 
 const uploadLimit = 512 * 1024;
+// Formats not yet tried as sprays, from ImageFormat in imageformat.h.
+const imageFormatBGR888 = 3;
+const imageFormatBGR565 = 17;
+const imageFormatBGRA4444 = 19;
 const outDir = path.resolve(import.meta.dirname, "..", "test-sprays");
 
 const sprays = [
@@ -56,7 +65,14 @@ const sprays = [
     // stretched to the square decal like any other rectangular spray.
     {width: 2048, height: 256, note: "2048 wide: drawn in full, stretched to the square"},
     {width: 256, height: 2048, note: "2048 tall: drawn in full, stretched to the square"},
-    {width: 1024, height: 1024, note: "over the limit, expected to be refused"},
+    {width: 1024, height: 1024, note: "over the limit: refused by TF2"},
+    // Where exactly the limit falls, between 1008x1040 (524,224 bytes, works) and
+    // 1024x1024 (524,352, refused). 1012x1036 is the only DXT1 size in between; the padded
+    // pair is 1008x1040 with zeros after the image data to exactly 512 KiB and one byte
+    // over, captioned with their file size, which the engine should not otherwise notice.
+    {width: 1012, height: 1036, note: "524,280 bytes, the largest DXT1 spray under 512 KiB"},
+    {width: 1008, height: 1040, padTo: 524288, note: "padded to exactly 512 KiB"},
+    {width: 1008, height: 1040, padTo: 524289, note: "padded to one byte over 512 KiB"},
 ];
 
 const black = [0, 0, 0];
@@ -318,7 +334,7 @@ function encodePNG(width, height, rgba) {
 
 fs.mkdirSync(outDir, {recursive: true});
 
-for (const {width, height, frames = 1, alphaFlag, mips, note} of sprays) {
+for (const {width, height, frames = 1, alphaFlag, mips, padTo, note} of sprays) {
     if (mips) {
         writeMipSpray(width, height, note);
         continue;
@@ -326,14 +342,16 @@ for (const {width, height, frames = 1, alphaFlag, mips, note} of sprays) {
     const alphaTest = alphaFlag !== undefined;
     let name = frames > 1 ? `spraytest_${width}x${height}_${frames}f` : `spraytest_${width}x${height}`;
     if (alphaTest) name += `_alpha${alphaFlag.toString(16)}`;
-    const options = alphaTest ? {transparent: true, caption: `0x${alphaFlag.toString(16)}`} : {};
+    if (padTo) name += `_${padTo}b`;
+    const options = alphaTest ? {transparent: true, caption: `0x${alphaFlag.toString(16)}`} : padTo ? {caption: String(padTo)} : {};
     const flags = alphaTest
         ? (baseFlags & ~(flagOneBitAlpha | flagEightBitAlpha)) | alphaFlag | flagNoMip
         : baseFlags | flagNoMip;
 
     // Without mips a VTF is simply every frame's top level, one after another.
     const frameBlocks = Array.from({length: frames}, (_, frame) => encodeDXT1(width, height, drawPattern(width, height, frame, frames, options)));
-    const vtf = Buffer.concat([buildHeader(width, height, frames, 1, flags), ...frameBlocks]);
+    const image = Buffer.concat([buildHeader(width, height, frames, 1, flags), ...frameBlocks]);
+    const vtf = padTo ? Buffer.concat([image, Buffer.alloc(padTo - image.length)]) : image;
 
     fs.writeFileSync(path.join(outDir, `${name}.vtf`), vtf);
     fs.writeFileSync(path.join(outDir, `${name}.vmt`), buildVMT(name));
@@ -428,15 +446,16 @@ function drawPixelArt(caption) {
 
 /**
  * Smooth gradients, where DXT1's four colours per block show as bands and uncompressed
- * colour should not, plus a soft fade at the edge for the format's 8-bit alpha.
+ * colour should not, plus a soft fade at the edge for the format's 8-bit alpha, unless
+ * opaque, for formats without alpha.
  */
-function drawGradients(size, caption) {
+function drawGradients(size, caption, {opaque = false} = {}) {
     const {pixels, put} = alphaSurface(size, size);
     for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
         const u = x / (size - 1), v = y / (size - 1);
         const r = Math.round(255 * u), g = Math.round(255 * v), b = Math.round(255 * (1 - u) * (1 - v) + 64 * u * v);
         const edge = Math.min(x, y, size - 1 - x, size - 1 - y);
-        put(x, y, [r, g, b, Math.round(255 * Math.min(1, edge / (size * 0.12)))]);
+        put(x, y, [r, g, b, opaque ? 255 : Math.round(255 * Math.min(1, edge / (size * 0.12)))]);
     }
     const {textWidth} = surface(size, size);
     const glyphs = surface(size, size);
@@ -463,7 +482,41 @@ const codecs = {
             return out;
         },
     },
+    // The untested formats; their previews decode with the reader the viewer uses.
+    [imageFormatBGR888]: {
+        encode: (width, height, rgba) => {
+            const out = new Uint8Array(width * height * 3);
+            for (let i = 0, o = 0; i < rgba.length; i += 4, o += 3) out.set([rgba[i + 2], rgba[i + 1], rgba[i]], o);
+            return out;
+        },
+        decode: vtfFormats[imageFormatBGR888].decode,
+    },
+    // Red in the top bits, as D3DFMT_R5G6B5, which Source loads as BGR565.
+    [imageFormatBGR565]: {
+        encode: (width, height, rgba) => packed16(rgba, (r, g, b) => (bits(r, 5) << 11) | (bits(g, 6) << 5) | bits(b, 5)),
+        decode: vtfFormats[imageFormatBGR565].decode,
+    },
+    // Alpha, red, green, blue from the top, as D3DFMT_A4R4G4B4.
+    [imageFormatBGRA4444]: {
+        encode: (width, height, rgba) => packed16(rgba, (r, g, b, a) => (bits(a, 4) << 12) | (bits(r, 4) << 8) | (bits(g, 4) << 4) | bits(b, 4)),
+        decode: vtfFormats[imageFormatBGRA4444].decode,
+    },
 };
+
+// An 8-bit channel cut to its top bits, rounded, and RGBA packed into 16-bit pixels.
+function bits(value, count) {
+    return Math.round(value * ((1 << count) - 1) / 255);
+}
+
+function packed16(rgba, pack) {
+    const out = new Uint8Array(rgba.length / 2);
+    for (let i = 0, o = 0; i < rgba.length; i += 4, o += 2) {
+        const v = pack(rgba[i], rgba[i + 1], rgba[i + 2], rgba[i + 3]);
+        out[o] = v & 0xFF;
+        out[o + 1] = v >> 8;
+    }
+    return out;
+}
 
 const formatSprays = [
     {name: "spraytest_512x512_dxt5_softalpha", size: 512, format: imageFormatDXT5, flags: flagEightBitAlpha,
@@ -478,6 +531,14 @@ const formatSprays = [
         draw: () => drawGradients(256, "12"), note: "BGRA8888: smooth gradients, soft edge fade"},
     {name: "spraytest_256x256_dxt1_gradients", size: 256, format: imageFormatDXT1, flags: flagOneBitAlpha,
         draw: () => drawGradients(256, "13"), note: "DXT1 control: banded gradients, hard edge"},
+    {name: "spraytest_416x416_bgr888", size: 416, format: imageFormatBGR888, flags: 0,
+        draw: () => drawGradients(416, "3", {opaque: true}), note: "BGR888: largest square at 3 bytes a pixel, exact colour, no alpha"},
+    {name: "spraytest_256x256_bgr888", size: 256, format: imageFormatBGR888, flags: 0,
+        draw: () => drawGradients(256, "3", {opaque: true}), note: "BGR888 control, small: tells format from size if the large one fails"},
+    {name: "spraytest_508x508_bgr565", size: 508, format: imageFormatBGR565, flags: 0,
+        draw: () => drawGradients(508, "17", {opaque: true}), note: "BGR565: 2 bytes a pixel, no alpha, light banding expected"},
+    {name: "spraytest_256x256_bgra4444", size: 256, format: imageFormatBGRA4444, flags: flagEightBitAlpha,
+        draw: () => drawSoftAlpha(256, "19"), note: "BGRA4444: soft alpha in 16 steps, coarse colour"},
 ];
 
 for (const {name, size, format, flags, draw, note} of formatSprays) {

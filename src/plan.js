@@ -3,7 +3,7 @@
  * count to use, and which source frames fill the slots. Pure functions with no browser
  * dependencies, so the UI can call them freely and tests run them under Node.
  */
-import {formatBGRA8888, formatDXT1, formatDXT5, textureFormats} from "./textureFormats.js";
+import {formatBGR888, formatBGRA8888, formatDXT1, formatDXT5, textureFormats} from "./textureFormats.js";
 import {maximumSize, mipDimensions} from "./vtf.js";
 
 export const preferDetail = "detail";
@@ -50,7 +50,7 @@ const largestPixelReduction = 64;
 
 // With detail and motion equal, the more exact format is kept (uncompressed over block
 // compressed) before the cheaper one.
-const formatExactness = {[formatBGRA8888]: 0, [formatDXT5]: 1, [formatDXT1]: 2};
+const formatExactness = {[formatBGR888]: 0, [formatBGRA8888]: 0, [formatDXT5]: 1, [formatDXT1]: 2};
 
 const roundUpToBlock = (n) => Math.max(4, Math.ceil(n / 4) * 4);
 
@@ -73,7 +73,8 @@ function* gridCandidates(sizes, format, coverX, coverY) {
 /**
  * Pixel art: one texel per scale x scale block of source pixels, for whole scales only, so
  * no pixel is ever blended with its neighbours. The texture is the image padded out to
- * whole blocks, square on the wall unless stretched, in an exact format and a compressed one.
+ * whole blocks, square on the wall unless stretched, in each of formats. BGR888 has no
+ * alpha, so it is only offered where the image fills the texture with no padding.
  */
 function* pixelCandidates(sourceWidth, sourceHeight, fit, formats) {
     for (let scale = 1; scale <= largestPixelReduction; scale++) {
@@ -81,7 +82,9 @@ function* pixelCandidates(sourceWidth, sourceHeight, fit, formats) {
         const height = Math.ceil(sourceHeight / scale);
         const side = roundUpToBlock(Math.max(width, height));
         const [targetWidth, targetHeight] = fit === fitStretch ? [roundUpToBlock(width), roundUpToBlock(height)] : [side, side];
+        const padded = targetWidth !== width || targetHeight !== height;
         for (const format of formats) {
+            if (format === formatBGR888 && padded) continue;
             yield {targetWidth, targetHeight, format, coveredX: width, coveredY: height, pixel: {scale, width, height}};
         }
         if (width <= 4 && height <= 4) return;
@@ -177,12 +180,14 @@ export function placeTarget(geometry, target, width, height) {
  *        against it
  * @param options
  *   softEdges  keep 8-bit alpha: DXT5 rather than DXT1
- *   pixelArt   whole pixels only, in BGRA8888 when that costs nothing, never with mips
+ *   pixelArt   whole pixels only, uncompressed when that costs nothing, never with mips
+ *   opaque     the image has no transparency: pixel art can then use BGR888, 3 bytes a
+ *              texel, where the image fills the texture
  * @returns {targetWidth, targetHeight, frames, format, pixel, detail, motion, waste, cost,
  *          ...} or null when nothing fits; pixel is {scale, width, height} for pixel art
  */
 export function chooseTarget(width, height, wantedFrames, {
-    useMips = false, preference = preferBalanced, fit = fitPad, softEdges = false, pixelArt = false,
+    useMips = false, preference = preferBalanced, fit = fitPad, softEdges = false, pixelArt = false, opaque = false,
 } = {}) {
     const weights = preferenceWeights[preference] || preferenceWeights[preferBalanced];
     const {source, decal} = fitGeometry(width, height, fit);
@@ -192,7 +197,7 @@ export function chooseTarget(width, height, wantedFrames, {
     const coverY = decal.y1 - decal.y0;
     const compressed = softEdges ? formatDXT5 : formatDXT1;
     const candidates = pixelArt && !useMips
-        ? pixelCandidates(sourceWidth, sourceHeight, fit, [formatBGRA8888, compressed])
+        ? pixelCandidates(sourceWidth, sourceHeight, fit, opaque ? [formatBGR888, formatBGRA8888, compressed] : [formatBGRA8888, compressed])
         : gridCandidates(useMips ? axisSizes : blockSizes, compressed, coverX, coverY);
     let best = null;
 
@@ -302,7 +307,7 @@ export const candidateChoices = [
  *          plays in game, and speed (original length over in-game length: above 1 plays
  *          fast, below 1 slow). A still only gets the balanced choice.
  */
-export function listCandidates(width, height, durations, {useMips = false, fit = fitPad, softEdges = false, pixelArt = false} = {}) {
+export function listCandidates(width, height, durations, {useMips = false, fit = fitPad, softEdges = false, pixelArt = false, opaque = false} = {}) {
     const animated = durations.length > 1;
     const sourceSeconds = durations.reduce((sum, d) => sum + d, 0) / 1000;
 
@@ -310,7 +315,7 @@ export function listCandidates(width, height, durations, {useMips = false, fit =
         .filter(choice => animated || choice.key === "balanced")
         .map(choice => {
             const wanted = targetFrameCount(durations, {keepAllFrames: choice.keepAllFrames});
-            const target = chooseTarget(width, height, wanted, {useMips, preference: choice.preference, fit, softEdges, pixelArt});
+            const target = chooseTarget(width, height, wanted, {useMips, preference: choice.preference, fit, softEdges, pixelArt, opaque});
             const playSeconds = target ? target.frames / engineFrameRate : 0;
             return {...choice, target, playSeconds, speed: animated && playSeconds ? sourceSeconds / playSeconds : 1};
         });

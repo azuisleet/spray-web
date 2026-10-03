@@ -227,6 +227,30 @@ describe("chooseTarget with soft edges and pixel art", () => {
         expect(target.format).toBe("dxt1");
     });
 
+    it("stores opaque pixel art without alpha, at sizes only that fits", () => {
+        // 400x400 uncompressed: 640,000 bytes with alpha, 480,000 without.
+        const target = chooseTarget(400, 400, 1, {pixelArt: true, opaque: true});
+        expect(size(target)).toBe("400x400x1");
+        expect(target.format).toBe("bgr888");
+        expect(target.pixel.scale).toBe(1);
+        expect(chooseTarget(400, 400, 1, {pixelArt: true}).format).toBe("dxt1");
+    });
+
+    it("prefers BGR888 to BGRA8888 for opaque pixel art, as it is smaller and looks the same", () => {
+        expect(chooseTarget(64, 64, 1, {pixelArt: true, opaque: true}).format).toBe("bgr888");
+    });
+
+    it("keeps alpha when opaque pixel art is padded, so the padding stays clear", () => {
+        expect(chooseTarget(48, 32, 1, {pixelArt: true, opaque: true}).format).toBe("bgra8888");
+        expect(chooseTarget(50, 50, 1, {pixelArt: true, opaque: true}).format).toBe("bgra8888");
+        const stretched = chooseTarget(48, 32, 1, {pixelArt: true, opaque: true, fit: fitStretch});
+        expect([size(stretched), stretched.format]).toEqual(["48x32x1", "bgr888"]);
+    });
+
+    it("uses BGR888 for pixel art only", () => {
+        expect(chooseTarget(400, 400, 1, {opaque: true}).format).toBe("dxt1");
+    });
+
     it("leaves pixel art out of mip tricks", () => {
         const target = chooseTarget(64, 64, 1, {pixelArt: true, useMips: true});
         expect(target.pixel).toBeNull();

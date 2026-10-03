@@ -1,6 +1,7 @@
 // From ImageFormat in the SDK's public/bitmap/imageformat.h. All three work for sprays in
 // TF2 (scripts/test-sprays.mjs): DXT5 keeps soft edges and partial transparency, since the
 // spray material blends alpha, and BGRA8888 keeps exact colour and 8-bit alpha.
+export const imageFormatBGR888 = 3;
 export const imageFormatBGRA8888 = 12;
 export const imageFormatDXT1 = 13;
 export const imageFormatDXT5 = 15;
@@ -26,10 +27,10 @@ export const flagEightBitAlpha = 0x2000;
 // UI texture in the SDK, so this pairing is the house style.
 export const baseFlags = flagClampS | flagClampT | flagNoLod | flagOneBitAlpha;
 
-// Budget for the DXT1 payload; the header fits in what is left of the 512 KB upload limit.
-// A spray filling it exactly (1008x1040, 524,224 bytes with header) works in TF2, and
-// 1024x1024 (524,352 bytes) does not fit.
-export const maximumSize = (1024 * 512) - 0x80;
+// Budget for the image data: what the header leaves of TF2's upload limit, which takes a
+// file of up to exactly 512 KiB. Test sprays of 524,280 bytes (1012x1036) and 524,288 (a
+// padded 1008x1040) upload; 524,289 bytes and 1024x1024 (524,352) are refused.
+export const maximumSize = (1024 * 512) - headerSize;
 
 export function buildHeader(width, height, frames, mipCount, flags, imageFormat = imageFormatDXT1) {
     const header = new Uint8Array(headerSize);

@@ -1,4 +1,4 @@
-import {hasSoftAlpha} from "./alpha.js";
+import {hasSoftAlpha, isOpaque} from "./alpha.js";
 import {openImage} from "./decode.js";
 import {getEncoderPool} from "./encoderPool.js";
 import {
@@ -6,7 +6,7 @@ import {
     preferBalanced, targetFrameCount,
 } from "./plan.js";
 import {filterNearest, filterSmooth} from "./resample.js";
-import {textureFormats} from "./textureFormats.js";
+import {formatBGR888, textureFormats} from "./textureFormats.js";
 import {baseFlags, buildHeader, flagEightBitAlpha, flagNoMip, flagOneBitAlpha, flagPointSample, headerSize, mipDimensions} from "./vtf.js";
 
 // Levels under 4x4 still cost a whole DXT1 block, so they are drawn at 4x4.
@@ -23,8 +23,9 @@ const defaultThumbnailSize = 512;
  * first frame for showing the source.
  *
  * @returns {width, height, frameCount, durations (ms), thumbnail: ImageBitmap, softAlpha,
- *          video}, where softAlpha says the first frame has partial transparency worth
- *          keeping, and video is {duration} in seconds for a video, else null
+ *          opaque, video}, where softAlpha says the first frame has partial transparency
+ *          worth keeping, opaque that it has no transparency at all, and video is
+ *          {duration} in seconds for a video, else null
  */
 export async function probeImage(file, {signal, thumbnailSize = defaultThumbnailSize} = {}) {
     const image = await openImage(file);
@@ -34,10 +35,12 @@ export async function probeImage(file, {signal, thumbnailSize = defaultThumbnail
 
         let thumbnail = null;
         let softAlpha = false;
+        let opaque = false;
         // Videos often open on a fade or a title, so theirs comes from the middle.
         const thumbnailFrame = image.duration !== undefined ? Math.floor(image.frameCount / 2) : 0;
         for await (const [, pixels] of image.frames([thumbnailFrame])) {
             softAlpha = hasSoftAlpha(pixels);
+            opaque = isOpaque(pixels);
             const scale = Math.min(1, thumbnailSize / Math.max(image.width, image.height));
             thumbnail = await createImageBitmap(new ImageData(new Uint8ClampedArray(pixels), image.width, image.height), {
                 resizeWidth: Math.max(1, Math.round(image.width * scale)),
@@ -48,7 +51,7 @@ export async function probeImage(file, {signal, thumbnailSize = defaultThumbnail
 
         // A video's length lets the caller choose a span; its timings depend on that span.
         const video = image.duration !== undefined ? {duration: image.duration} : null;
-        return {width: image.width, height: image.height, frameCount: image.frameCount, durations, thumbnail, softAlpha, video};
+        return {width: image.width, height: image.height, frameCount: image.frameCount, durations, thumbnail, softAlpha, opaque, video};
     } finally {
         image.close();
     }
@@ -80,6 +83,9 @@ function yieldToEventLoop() {
  *   softEdges  keep 8-bit alpha (DXT5) so soft edges and partial transparency survive
  *   pixelArt   whole pixels only, point sampled in game, uncompressed when that costs
  *              nothing; ignored for a mip trick
+ *   opaque     the image has no transparency, as probeImage found from one frame: pixel
+ *              art may then be stored without alpha. Should another frame turn out to
+ *              have some, the conversion starts again without it.
  *   trim       {start, end} in seconds: the span of a video to use (default: its start)
  *   keepAllFrames  plan for every source frame rather than for real-time playback at
  *              the engine's 5 fps; the spray then plays slower than the original
@@ -91,6 +97,32 @@ function yieldToEventLoop() {
  *           levels[level][frame] is the DXT1 data
  */
 export async function convertImage(file, options = {}) {
+    const {signal} = options;
+    // Each attempt has its own signal, so the work of one abandoned for transparency is
+    // cancelled and stops reporting progress.
+    const attempt = async (opaque) => {
+        const controller = new AbortController();
+        const abort = () => controller.abort(signal.reason);
+        if (signal?.aborted) abort();
+        signal?.addEventListener("abort", abort);
+        try {
+            return await convertOnce(file, {...options, opaque, signal: controller.signal});
+        } catch (error) {
+            if (!(error instanceof NotOpaqueError)) throw error;
+            controller.abort(error);
+            signal?.throwIfAborted();
+            return null;
+        } finally {
+            signal?.removeEventListener("abort", abort);
+        }
+    };
+    return (options.opaque && await attempt(true)) || attempt(false);
+}
+
+// A frame with transparency, found while converting for an opaque format.
+class NotOpaqueError extends Error {}
+
+async function convertOnce(file, options) {
     const {
         mipTrick = null,
         preference = preferBalanced,
@@ -99,6 +131,7 @@ export async function convertImage(file, options = {}) {
         keepAllFrames = false,
         softEdges = false,
         pixelArt = false,
+        opaque = false,
         trim,
         signal,
         onProgress = () => {},
@@ -124,7 +157,7 @@ export async function convertImage(file, options = {}) {
         signal?.throwIfAborted();
         const wantedFrames = targetFrameCount(durations, {keepAllFrames});
 
-        const target = chooseTarget(width, height, wantedFrames, {useMips, preference, fit, softEdges, pixelArt});
+        const target = chooseTarget(width, height, wantedFrames, {useMips, preference, fit, softEdges, pixelArt, opaque});
         if (!target) throw new Error("Image cannot be fit inside the 512 KB spray limit");
 
         const {targetWidth, targetHeight, frames: nFrames} = target;
@@ -197,6 +230,7 @@ export async function convertImage(file, options = {}) {
 
         for await (const [index, pixels] of image.frames([...slotsByIndex.keys()])) {
             signal?.throwIfAborted();
+            if (format === formatBGR888 && !isOpaque(pixels)) throw new NotOpaqueError("A frame has transparency");
             const source = {pixels, width, height};
             const slots = slotsByIndex.get(index);
             const work = Promise.all(nearLevels.map((level, n) => render(source, level).then(blocks => {

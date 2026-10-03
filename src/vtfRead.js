@@ -57,7 +57,7 @@ export const vtfFormats = {
     0: {name: "RGBA8888", ...uncompressed(4, (d, p) => [d[p], d[p + 1], d[p + 2], d[p + 3]])},
     1: {name: "ABGR8888", ...uncompressed(4, (d, p) => [d[p + 3], d[p + 2], d[p + 1], d[p]])},
     2: {name: "RGB888", ...uncompressed(3, (d, p) => [d[p], d[p + 1], d[p + 2], 255])},
-    3: {name: "BGR888", ...uncompressed(3, (d, p) => [d[p + 2], d[p + 1], d[p], 255])},
+    3: {name: "BGR888", confirmed: true, ...uncompressed(3, (d, p) => [d[p + 2], d[p + 1], d[p], 255])},
     4: {name: "RGB565", ...uncompressed(2, (d, p) => { const v = u16(d, p); return [scale5(v & 31), scale6((v >> 5) & 63), scale5(v >> 11), 255]; })},
     5: {name: "I8", ...uncompressed(1, (d, p) => [d[p], d[p], d[p], 255])},
     6: {name: "IA88", ...uncompressed(2, (d, p) => [d[p], d[p], d[p], d[p + 1]])},
@@ -68,9 +68,9 @@ export const vtfFormats = {
     14: {name: "DXT3", size: (w, h) => blocks(w, h) * 16, decode: decodeDXT3},
     15: {name: "DXT5", confirmed: true, size: (w, h) => blocks(w, h) * 16, decode: decodeDXT5},
     16: {name: "BGRX8888", ...uncompressed(4, (d, p) => [d[p + 2], d[p + 1], d[p], 255])},
-    17: {name: "BGR565", ...uncompressed(2, (d, p) => { const v = u16(d, p); return [scale5(v >> 11), scale6((v >> 5) & 63), scale5(v & 31), 255]; })},
+    17: {name: "BGR565", confirmed: true, ...uncompressed(2, (d, p) => { const v = u16(d, p); return [scale5(v >> 11), scale6((v >> 5) & 63), scale5(v & 31), 255]; })},
     18: {name: "BGRX5551", ...uncompressed(2, (d, p) => { const v = u16(d, p); return [scale5((v >> 10) & 31), scale5((v >> 5) & 31), scale5(v & 31), 255]; })},
-    19: {name: "BGRA4444", ...uncompressed(2, (d, p) => { const v = u16(d, p); return [scale4((v >> 8) & 15), scale4((v >> 4) & 15), scale4(v & 15), scale4(v >> 12)]; })},
+    19: {name: "BGRA4444", confirmed: true, ...uncompressed(2, (d, p) => { const v = u16(d, p); return [scale4((v >> 8) & 15), scale4((v >> 4) & 15), scale4(v & 15), scale4(v >> 12)]; })},
     20: {name: "DXT1 with 1-bit alpha", confirmed: true, size: (w, h) => blocks(w, h) * 8, decode: decodeDXT1},
     21: {name: "BGRA5551", ...uncompressed(2, (d, p) => { const v = u16(d, p); return [scale5((v >> 10) & 31), scale5((v >> 5) & 31), scale5(v & 31), v & 0x8000 ? 255 : 0]; })},
 };
@@ -162,7 +162,8 @@ export function readVTF(buffer) {
         checks.push({severity: "warning", text: "It has mipmaps at a size that is not a power of two: TF2 draws those levels out of alignment."});
     }
     if (!codec.confirmed) {
-        checks.push({severity: "warning", text: `Sprays in ${codec.name} have not been tested in TF2; DXT1, DXT5 and BGRA8888 are known to work.`});
+        const known = Object.values(vtfFormats).filter(f => f.confirmed && !f.name.includes(" ")).map(f => f.name);
+        checks.push({severity: "warning", text: `Sprays in ${codec.name} have not been tested in TF2; ${known.slice(0, -1).join(", ")} and ${known.at(-1)} are known to work.`});
     }
     if (width > 2048 || height > 2048) {
         checks.push({severity: "warning", text: "Sides over 2048 have not been tested in TF2."});

@@ -1,5 +1,5 @@
 import {describe, expect, it} from "vitest";
-import {hasSoftAlpha} from "../src/alpha.js";
+import {hasSoftAlpha, isOpaque} from "../src/alpha.js";
 
 function image(width, height, alpha) {
     const rgba = new Uint8Array(width * height * 4);
@@ -35,5 +35,17 @@ describe("hasSoftAlpha", () => {
             return d < 80 ? 255 : d < 81 ? 128 : 0;
         });
         expect(hasSoftAlpha(rgba)).toBe(true);
+    });
+});
+
+describe("isOpaque", () => {
+    it("takes solid images, and alpha too close to solid to see", () => {
+        expect(isOpaque(image(16, 16, () => 255))).toBe(true);
+        expect(isOpaque(image(16, 16, (x) => x === 0 ? 254 : 255))).toBe(true);
+    });
+
+    it("refuses a single clear or visibly partial pixel", () => {
+        expect(isOpaque(image(16, 16, (x, y) => x === 5 && y === 5 ? 0 : 255))).toBe(false);
+        expect(isOpaque(image(16, 16, (x, y) => x === 5 && y === 5 ? 200 : 255))).toBe(false);
     });
 });

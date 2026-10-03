@@ -137,6 +137,7 @@ function App() {
     const softEdges = softEdgesChoice ?? !!info?.softAlpha;
     // Pixel art keeps whole pixels, which a mip chain would blend away.
     const pixelArt = pixelArtChoice && !mipTrick;
+    const opaque = !!info?.opaque;
     const video = info?.video ?? null;
     // Memoised: the span is part of the conversion job, and a fresh object on every render
     // would restart the conversion on every render.
@@ -150,9 +151,9 @@ function App() {
 
     const candidates = useMemo(
         // Every frame of a video means its 30 a second played at 5: not worth offering.
-        () => info ? listCandidates(info.width, info.height, durations, {useMips: mipTrick, fit, softEdges, pixelArt})
+        () => info ? listCandidates(info.width, info.height, durations, {useMips: mipTrick, fit, softEdges, pixelArt, opaque})
             .filter(candidate => !(video && candidate.keepAllFrames)) : [],
-        [info, durations, video, mipTrick, fit, softEdges, pixelArt]);
+        [info, durations, video, mipTrick, fit, softEdges, pixelArt, opaque]);
     const choice = candidateChoices.find(c => c.key === (video && choiceKey === "all" ? "balanced" : choiceKey));
 
     const job = useMemo(() => {
@@ -167,11 +168,12 @@ function App() {
                 focus,
                 softEdges,
                 pixelArt,
+                opaque,
                 trim: plannedTrim,
                 mipTrick: mipTrick ? {file: farFile, swapPixels, focus: farFocus} : null,
             },
         };
-    }, [file, farFile, mipTrick, swapPixels, choice, fit, focus, farFocus, softEdges, pixelArt, plannedTrim]);
+    }, [file, farFile, mipTrick, swapPixels, choice, fit, focus, farFocus, softEdges, pixelArt, opaque, plannedTrim]);
 
     const {status, progress, result, error} = useConversion(job);
     const converting = status === "converting";
@@ -270,7 +272,7 @@ function App() {
                                     <span className="block text-steel dark:text-zinc-400">
                                         {mipTrick
                                             ? "Not available with a mip trick."
-                                            : "Keeps every pixel whole and sharp in game, in exact colour when it fits."}
+                                            : "Keeps every pixel whole and sharp in game, in exact color when it fits."}
                                     </span>
                                 </span>
                             </label>

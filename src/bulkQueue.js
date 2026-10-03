@@ -70,7 +70,7 @@ export class BulkQueue {
         const choice = candidateChoices.find(c => c.key === choiceKey);
         const softEdges = this.#settings.softEdges && !!item.info?.softAlpha;
         const pixelArt = this.#settings.pixelArt;
-        const shape = {fit, softEdges, pixelArt};
+        const shape = {fit, softEdges, pixelArt, opaque: !!item.info?.opaque};
         // A video uses its opening span, and never every frame (30 a second played at 5).
         const video = item.info?.video;
         const trim = video ? defaultTrim(video.duration) : undefined;

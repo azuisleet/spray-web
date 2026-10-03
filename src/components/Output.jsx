@@ -1,4 +1,4 @@
-import {formatBGRA8888, formatDXT5, textureFormats} from "../textureFormats.js";
+import {formatBGR888, formatBGRA8888, formatDXT5, textureFormats} from "../textureFormats.js";
 import {buildVMT} from "../vtf.js";
 import {downloadBlob} from "../useConversion.js";
 
@@ -7,7 +7,8 @@ const uploadLimit = 512 * 1024;
 function formatDescription(format) {
     const {label} = textureFormats[format];
     if (format === formatDXT5) return `${label}, soft edges`;
-    if (format === formatBGRA8888) return `${label}, exact colour`;
+    if (format === formatBGRA8888) return `${label}, exact color`;
+    if (format === formatBGR888) return `${label}, exact color, opaque`;
     return label;
 }
 

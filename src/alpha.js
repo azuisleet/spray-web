@@ -16,6 +16,14 @@ const invisibleAlpha = 8;
 // few enough that an anti-aliased outline still counts.
 const softAlphaShare = 0.002;
 
+/** Whether every pixel is solid, or close enough that no transparency can be seen. */
+export function isOpaque(pixels) {
+    for (let i = 3; i < pixels.length; i += 4) {
+        if (pixels[i] < 255 - invisibleAlpha) return false;
+    }
+    return true;
+}
+
 export function hasSoftAlpha(pixels) {
     let partial = 0;
     for (let i = 3; i < pixels.length; i += 4) {

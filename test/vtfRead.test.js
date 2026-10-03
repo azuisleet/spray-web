@@ -3,6 +3,8 @@ import {decodeDXT1, encodeDXT1} from "../src/dxt1.js";
 import {encodeDXT5} from "../src/dxt5.js";
 import {baseFlags, buildHeader, flagNoMip, flagPointSample, imageFormatBGRA8888, imageFormatDXT5, mipDimensions} from "../src/vtf.js";
 import {describeFlags, readVTF} from "../src/vtfRead.js";
+import {codecs} from "../src/codecs.js";
+import {formatBGR888, textureFormats} from "../src/textureFormats.js";
 
 function image(width, height, pixel) {
     const rgba = new Uint8Array(width * height * 4);
@@ -20,6 +22,17 @@ const concat = (...parts) => {
 const pattern = (frame) => image(16, 16, (x, y) => [x * 16, y * 16, frame * 80, 255]);
 
 describe("readVTF", () => {
+    it("reads back a BGR888 spray from the converter's codec, opaque", () => {
+        const rgba = image(16, 16, (x, y) => [x * 16, y * 16, 99, 255]);
+        const data = codecs[formatBGR888].encode(16, 16, rgba);
+        expect(data.length).toBe(textureFormats[formatBGR888].size(16, 16));
+        const vtf = readVTF(concat(buildHeader(16, 16, 1, 1, flagNoMip, textureFormats[formatBGR888].vtf), data));
+        expect(vtf.formatName).toBe("BGR888");
+        expect(vtf.levels[0][0]).toEqual(rgba);
+        expect(codecs[formatBGR888].decode(16, 16, data)).toEqual(rgba);
+        expect(vtf.checks.some(c => c.severity !== "info")).toBe(false);
+    });
+
     it("reads back an animated DXT1 spray exactly as encoded", () => {
         const frames = [0, 1, 2].map(f => encodeDXT1(16, 16, pattern(f)));
         const file = concat(buildHeader(16, 16, 3, 1, baseFlags | flagNoMip), ...frames);
